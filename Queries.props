@@ -1,0 +1,74 @@
+// =====================================================================
+// PRISM query templates for the eVTOL vertiport CTMC models.
+//
+// BigraphER exports, for every model/parameter combination:
+//     <model>.tra    transition matrix (CTMC, rate-labelled)
+//     <model>.csl    label definitions (atomic propositions over state x)
+//     <model>.rews   state rewards (the OPH reward = sum of enabled
+//                    land/take-off rates in each state)
+//
+// PRISM is invoked as
+//     prism -importtrans <model>.tra \
+//           -importstaterewards <model>.rews -ctmc \
+//           <props> -gs -maxiters 1000000
+// where <props> = the generated <model>.csl  followed by the queries
+// below (the label definitions must precede the queries).  Gauss-Seidel
+// (-gs) is required for the steady-state solves to converge.
+//
+// The analysis scripts assemble these automatically; this file documents
+// the meaning of each query.
+// =====================================================================
+
+// ---- Capacity / throughput (operations per hour = 60 * value) -------
+// Long-run average reward = operations per minute.
+R=? [ S ]
+
+// Transient accumulated operations over a finite horizon (Port-style).
+const double t;
+R=? [ C<=t ]
+
+// Instantaneous reward rate at time t, useful for recovery curves.
+R=? [ I=t ]
+
+// ---- Pad utilisation (single-pad layouts V1 / V2) -------------------
+S=? [ "tlof_landing" ]      // P(pad busy with a landing)
+S=? [ "tlof_departing" ]    // P(pad busy with a departure)
+S=? [ "pad_free" ]          // P(pad idle / available)
+
+// ---- Pad utilisation (dual-pad layout V3) ---------------------------
+S=? [ "small_pad_landing" ]
+S=? [ "small_pad_departing" ]
+S=? [ "large_pad_landing" ]
+S=? [ "large_pad_departing" ]
+
+// ---- Congestion -----------------------------------------------------
+S=? [ "all_stands_busy" ]   // P(every stand occupied)
+
+// ---- V3 one-way transit blocking ------------------------------------
+// Labels are parameterised by waiting count; scripts query _1/_2 as needed.
+S=? [ "small_transit_blocked_1" ]
+S=? [ "large_transit_blocked_1" ]
+
+// ---- Open M/M/c/K arrivals (Vertiport_V1_Open / V2_Open) -------------
+// Blocking/loss probability by PASTA: external arrivals see time averages.
+S=? [ "approach_full" ]
+// Mean counts are computed by scripts from labels app_count_i,
+// taxi_in_count_i, taxi_out_count_i, svc_count_i, rdy_count_i,
+// pad_in_system and pad_out_system:
+//   L = sum_i i * S=?["app_count_i"] + ...
+//   delay = L / (lambda_eff), lambda_eff = arrival_rate * (1-P_block)
+
+// ---- Safety (must be 0 : exclusive resources never double-booked) ----
+P=? [ F "er_pad_conflict" ]
+// V3:
+P=? [ F "er_small_pad_conflict" ]
+P=? [ F "er_large_pad_conflict" ]
+
+// ---- Resilience (Vertiport_V1_Resilience_SBrs) ----------------------
+S=? [ "pad_closed" ]        // long-run pad unavailability
+S=? [ "weather_bad" ]       // long-run weather disruption probability
+S=? [ "stands_out_1" ]      // at least one failed stand (scripts sum labels)
+P=? [ F<=t "nominal" ]      // recoverability / time-to-nominal distribution
+// OPH (R=?[S]) is re-evaluated while sweeping fault_rate to obtain the
+// capacity-degradation curve.  Robustness is computed in Python as
+// R_b = OPH_degraded / OPH_nominal (Das-style).

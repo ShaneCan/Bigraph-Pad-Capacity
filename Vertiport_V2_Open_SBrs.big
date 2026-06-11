@@ -1,0 +1,143 @@
+# =====================================================================
+# eVTOL Vertiport - Structure V2 Open Arrival : 1 TLOF + 4 Stands
+# ---------------------------------------------------------------------
+# Open M/M/c/K-style CTMC variant.  Aircraft arrive from outside with a
+# Poisson rate arr_rate into a finite approach queue (capacity k_app).
+# If the approach queue is full, no arrival transition is enabled; by
+# PASTA, S=?["approach_full"] is the blocking/loss probability.
+#
+# Departures leave the system instead of recycling to the approach.
+# OPH reward keeps the paper convention: one landing + one takeoff are two
+# operations, so OPH = 60 * R=?[S] and can be compared with saturated OPH.
+#
+# Command line:
+#   -c arr_rate=2.0,k_app=6,k_taxi=3
+# =====================================================================
+
+ctrl TLOF       = 0;
+atomic ctrl Free   = 0;
+atomic ctrl PadIn  = 0;
+atomic ctrl PadOut = 0;
+
+ctrl Approach   = 0; atomic fun ctrl AppN(k) = 0;
+ctrl TaxiIn     = 0; atomic fun ctrl TiN(k)  = 0;
+ctrl TaxiOut    = 0; atomic fun ctrl ToN(k)  = 0;
+ctrl Stands     = 0;
+atomic fun ctrl Fre(k) = 0;
+atomic fun ctrl Svc(k) = 0;
+atomic fun ctrl Rdy(k) = 0;
+
+int m_stand = 4;
+
+float rate_land     = 1.0;
+float rate_clear    = 6.0;
+float rate_enter    = 4.0;
+float rate_service  = 0.15;
+float rate_leave    = 6.0;
+float rate_lineup   = 4.0;
+float rate_takeoff  = 1.0;
+
+int rew_land    = 1;
+int rew_takeoff = 1;
+
+fun react arrival(a) =
+    Approach.AppN(a)
+  -[arr_rate]->
+    Approach.AppN(a + 1);
+
+fun react land(a, t) =
+    Approach.AppN(a) | TLOF.Free | TaxiIn.TiN(t)
+  -[rate_land]->
+    Approach.AppN(a - 1) | TLOF.PadIn | TaxiIn.TiN(t);
+
+fun react clear_pad(t) =
+    TLOF.PadIn | TaxiIn.TiN(t)
+  -[rate_clear]->
+    TLOF.Free | TaxiIn.TiN(t + 1);
+
+fun react enter_stand(t, f, s) =
+    TaxiIn.TiN(t) | Stands.(Fre(f) | Svc(s) | id)
+  -[rate_enter]->
+    TaxiIn.TiN(t - 1) | Stands.(Fre(f - 1) | Svc(s + 1) | id);
+
+fun react turnaround(s, r) =
+    Stands.(Svc(s) | Rdy(r) | id)
+  -[s * rate_service]->
+    Stands.(Svc(s - 1) | Rdy(r + 1) | id);
+
+fun react leave_stand(r, f, o) =
+    Stands.(Rdy(r) | Fre(f) | id) | TaxiOut.ToN(o)
+  -[rate_leave]->
+    Stands.(Rdy(r - 1) | Fre(f + 1) | id) | TaxiOut.ToN(o + 1);
+
+fun react lineup(o) =
+    TaxiOut.ToN(o) | TLOF.Free
+  -[rate_lineup]->
+    TaxiOut.ToN(o - 1) | TLOF.PadOut;
+
+react takeoff =
+    TLOF.PadOut
+  -[rate_takeoff]->
+    TLOF.Free;
+
+fun big land_enabled(a, t) = Approach.AppN(a) | TLOF.Free | TaxiIn.TiN(t);
+big takeoff_enabled      = TLOF.PadOut;
+big tlof_landing         = TLOF.PadIn;
+big tlof_departing       = TLOF.PadOut;
+big all_stands_busy      = Stands.(Fre(0) | id);
+big approach_full        = Approach.AppN(k_app);
+fun big app_count(a)     = Approach.AppN(a);
+fun big taxi_in_count(t) = TaxiIn.TiN(t);
+fun big taxi_out_count(o)= TaxiOut.ToN(o);
+fun big svc_count(s)     = Stands.(Svc(s) | id);
+fun big rdy_count(r)     = Stands.(Rdy(r) | id);
+big pad_in_system        = TLOF.(PadIn | id);
+big pad_out_system       = TLOF.(PadOut | id);
+big er_pad_conflict      = TLOF.(PadIn | PadOut | id);
+
+big s0 =
+    Approach.AppN(0)
+  | TLOF.Free
+  | TaxiIn.TiN(0)
+  | TaxiOut.ToN(0)
+  | Stands.(Fre(m_stand) | Svc(0) | Rdy(0));
+
+begin sbrs
+  int app_arr = [0:1:k_app - 1];
+  int app_pos = [1:1:k_app];
+  int ti_pos  = [1:1:k_taxi];
+  int ti_any0 = [0:1:k_taxi - 1];
+  int to_pos  = [1:1:k_taxi];
+  int to_any0 = [0:1:k_taxi - 1];
+  int s_pos   = [1:1:m_stand];
+  int s_any0  = [0:1:m_stand - 1];
+  int r_pos   = [1:1:m_stand];
+  int r_any0  = [0:1:m_stand - 1];
+  int f_pos   = [1:1:m_stand];
+  int f_any0  = [0:1:m_stand - 1];
+  int app_all = [0:1:k_app];
+  int taxi_all = [0:1:k_taxi];
+  int stand_all = [0:1:m_stand];
+  init s0;
+  rules = [
+    { arrival(app_arr), land(app_pos, ti_any0), clear_pad(ti_any0),
+      enter_stand(ti_pos, f_pos, s_any0), turnaround(s_pos, r_any0),
+      leave_stand(r_pos, f_any0, to_any0), lineup(to_pos), takeoff }
+  ];
+  preds = {
+    land_enabled(app_pos, ti_any0)[rew_land],
+    takeoff_enabled[rew_takeoff],
+    tlof_landing,
+    tlof_departing,
+    all_stands_busy,
+    approach_full,
+    app_count(app_all),
+    taxi_in_count(taxi_all),
+    taxi_out_count(taxi_all),
+    svc_count(stand_all),
+    rdy_count(stand_all),
+    pad_in_system,
+    pad_out_system,
+    er_pad_conflict
+  };
+end

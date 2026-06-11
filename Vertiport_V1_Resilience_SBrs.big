@@ -1,0 +1,205 @@
+# =====================================================================
+# eVTOL Vertiport - RESILIENCE extension of V1 (1 TLOF + 3 Stands)
+# ---------------------------------------------------------------------
+# A stochastic fault/repair CTMC that quantifies how disruptions erode
+# the capacity (OPH) of the baseline V1 layout.  Three disruption sources:
+#
+#   1. Pad closure (weather / incident / safety inspection).
+#      The TLOF can close while free  (Free --pad_fault--> Closed) and is
+#      later reopened (Closed --pad_repair--> Free).  No landing, line-up
+#      or take-off can use a closed pad, so throughput stalls during
+#      closures.  fault_rate is swept to obtain the OPH degradation curve.
+#
+#   2. Stand outage.  A free stand can fail and be repaired, reducing the
+#      effective number of available turnaround positions.
+#
+#   3. Maintenance fault at a stand.  When an aircraft enters a stand its
+#      turnaround is normal with prob. ~0.9 or *faulted* with prob. ~0.1;
+#      a faulted turnaround is much slower (rate_service_fault), modelling
+#      the README's normal/fault maintenance branch.
+#
+#   4. Weather/approach disruption.  Bad weather blocks new landings until
+#      the weather process recovers, representing go-around/hold behaviour.
+#
+# Kept as an SBRS (CTMC) so OPH = 60 * R=?[S] stays comparable to the
+# capacity models and can be plotted against the fault rate.
+#
+# Command line:  -c n_evtol=4,fault_rate=0.05,repair_rate=0.5,stand_fault_rate=0.001,stand_repair_rate=0.4,weather_fault_rate=0.001,weather_repair_rate=0.6
+# (fault_rate and repair_rate per minute; n_evtol the fleet size.)
+# =====================================================================
+
+# ---------- the single pad, now with a Closed status ----------
+ctrl TLOF       = 0;
+atomic ctrl Free   = 0;        # free & operational
+atomic ctrl PadIn  = 0;        # occupied by a landing aircraft
+atomic ctrl PadOut = 0;        # occupied by a departing aircraft
+atomic ctrl Closed = 0;        # out of service (disruption)
+
+# ---------- counted locations ----------
+ctrl Approach   = 0;  atomic fun ctrl AppN(k) = 0;
+ctrl TaxiIn     = 0;  atomic fun ctrl TiN(k)  = 0;
+ctrl TaxiOut    = 0;  atomic fun ctrl ToN(k)  = 0;
+ctrl Stands     = 0;
+atomic fun ctrl Fre(k)  = 0;   # free stands
+atomic fun ctrl Out(k)  = 0;   # failed / unavailable stands
+atomic fun ctrl SvcN(k) = 0;   # normal turnaround in progress
+atomic fun ctrl SvcF(k) = 0;   # faulted (slow) turnaround in progress
+atomic fun ctrl Rdy(k)  = 0;   # ready to push back
+
+ctrl Weather = 0;
+atomic ctrl Good = 0;
+atomic ctrl Bad  = 0;
+
+# ---------- layout constant ----------
+int m_stand = 3;
+
+# ---------- nominal rates (per minute) ----------
+float rate_land          = 1.0;
+float rate_clear         = 6.0;
+float rate_enter_normal  = 3.6;   # 90% of entries -> normal turnaround
+float rate_enter_fault   = 0.4;   # 10% of entries -> faulted turnaround
+float rate_service_norm  = 0.15;  # normal turnaround (~6.7 min)
+float rate_service_fault = 0.05;  # faulted turnaround (~20 min, much slower)
+float rate_leave         = 6.0;
+float rate_lineup        = 4.0;
+float rate_takeoff       = 1.0;
+
+# ---------- integer reward weights (MUST equal the rule rates) ----------
+int rew_land    = 1;
+int rew_takeoff = 1;
+
+# fault_rate and repair_rate are supplied with -c (so they can be swept).
+
+# =====================================================================
+# Reaction rules
+# =====================================================================
+fun react land(a) =
+    Approach.AppN(a) | TLOF.Free | Weather.Good
+  -[rate_land]->
+    Approach.AppN(a - 1) | TLOF.PadIn | Weather.Good;
+
+fun react clear_pad(t) =
+    TLOF.PadIn | TaxiIn.TiN(t)
+  -[rate_clear]->
+    TLOF.Free | TaxiIn.TiN(t + 1);
+
+# Enter a free stand: normal vs faulted turnaround (probabilistic split).
+fun react enter_normal(t, f, s) =
+    TaxiIn.TiN(t) | Stands.(Fre(f) | SvcN(s) | id)
+  -[rate_enter_normal]->
+    TaxiIn.TiN(t - 1) | Stands.(Fre(f - 1) | SvcN(s + 1) | id);
+
+fun react enter_fault(t, f, s) =
+    TaxiIn.TiN(t) | Stands.(Fre(f) | SvcF(s) | id)
+  -[rate_enter_fault]->
+    TaxiIn.TiN(t - 1) | Stands.(Fre(f - 1) | SvcF(s + 1) | id);
+
+fun react turn_normal(s, r) =
+    Stands.(SvcN(s) | Rdy(r) | id)
+  -[s * rate_service_norm]->
+    Stands.(SvcN(s - 1) | Rdy(r + 1) | id);
+
+fun react turn_fault(s, r) =
+    Stands.(SvcF(s) | Rdy(r) | id)
+  -[s * rate_service_fault]->
+    Stands.(SvcF(s - 1) | Rdy(r + 1) | id);
+
+fun react leave_stand(r, f, o) =
+    Stands.(Rdy(r) | Fre(f) | id) | TaxiOut.ToN(o)
+  -[rate_leave]->
+    Stands.(Rdy(r - 1) | Fre(f + 1) | id) | TaxiOut.ToN(o + 1);
+
+fun react lineup(o) =
+    TaxiOut.ToN(o) | TLOF.Free
+  -[rate_lineup]->
+    TaxiOut.ToN(o - 1) | TLOF.PadOut;
+
+fun react takeoff(a) =
+    TLOF.PadOut | Approach.AppN(a)
+  -[rate_takeoff]->
+    TLOF.Free | Approach.AppN(a + 1);
+
+# ---------- disruption: pad closes (while free) and is repaired ----------
+react pad_fault =
+    TLOF.Free -[fault_rate]-> TLOF.Closed;
+
+react pad_repair =
+    TLOF.Closed -[repair_rate]-> TLOF.Free;
+
+# ---------- disruption: free stands can fail and later be repaired ----------
+fun react stand_fault(f, o) =
+    Stands.(Fre(f) | Out(o) | id)
+  -[stand_fault_rate]->
+    Stands.(Fre(f - 1) | Out(o + 1) | id);
+
+fun react stand_repair(o, f) =
+    Stands.(Out(o) | Fre(f) | id)
+  -[stand_repair_rate]->
+    Stands.(Out(o - 1) | Fre(f + 1) | id);
+
+# ---------- disruption: bad weather blocks new landings ----------------
+react weather_fault =
+    Weather.Good -[weather_fault_rate]-> Weather.Bad;
+
+react weather_repair =
+    Weather.Bad -[weather_repair_rate]-> Weather.Good;
+
+# =====================================================================
+# Predicates: OPH rewards, availability / utilisation, safety
+# =====================================================================
+fun big land_enabled(a) = Approach.AppN(a) | TLOF.Free | Weather.Good;   # a >= 1
+big takeoff_enabled      = TLOF.PadOut;
+
+big pad_closed       = TLOF.Closed;
+big weather_bad      = Weather.Bad;
+big pad_landing      = TLOF.PadIn;
+big pad_departing    = TLOF.PadOut;
+big all_stands_busy  = Stands.(Fre(0) | id);
+fun big stands_out(o)= Stands.(Out(o) | id);             # o >= 1
+fun big faulted_turnarounds(s) = Stands.(SvcF(s) | id);   # s >= 1
+big nominal          = TLOF.Free | Weather.Good;
+
+big er_pad_conflict  = TLOF.(PadIn | PadOut | id);
+
+# =====================================================================
+# Initial state
+# =====================================================================
+big s0 =
+    Approach.AppN(n_evtol)
+  | TLOF.Free
+  | TaxiIn.TiN(0)
+  | TaxiOut.ToN(0)
+  | Stands.(Fre(m_stand) | Out(0) | SvcN(0) | SvcF(0) | Rdy(0))
+  | Weather.Good;
+
+begin sbrs
+  int a_pos   = [1:1:n_evtol];   int a_any0 = [0:1:n_evtol - 1];
+  int t_pos   = [1:1:n_evtol];   int t_any0 = [0:1:n_evtol - 1];
+  int o_pos   = [1:1:n_evtol];   int o_any0 = [0:1:n_evtol - 1];
+  int s_pos   = [1:1:m_stand];   int s_any0 = [0:1:m_stand - 1];
+  int r_pos   = [1:1:m_stand];   int r_any0 = [0:1:m_stand - 1];
+  int f_pos   = [1:1:m_stand];   int f_any0 = [0:1:m_stand - 1];
+  int out_pos = [1:1:m_stand];   int out_any0 = [0:1:m_stand - 1];
+  init s0;
+  rules = [
+    { land(a_pos), takeoff(a_any0), clear_pad(t_any0),
+      enter_normal(t_pos, f_pos, s_any0), enter_fault(t_pos, f_pos, s_any0),
+      turn_normal(s_pos, r_any0), turn_fault(s_pos, r_any0),
+      leave_stand(r_pos, f_any0, o_any0), lineup(o_pos),
+      pad_fault, pad_repair, stand_fault(f_pos, out_any0),
+      stand_repair(out_pos, f_any0), weather_fault, weather_repair }
+  ];
+  preds = {
+    land_enabled(a_pos)[rew_land],
+    takeoff_enabled[rew_takeoff],
+    pad_closed,
+    weather_bad,
+    pad_landing,
+    pad_departing,
+    all_stands_busy,
+    stands_out(out_pos),
+    faulted_turnarounds(s_pos),
+    nominal,
+    er_pad_conflict
+  };
+end
