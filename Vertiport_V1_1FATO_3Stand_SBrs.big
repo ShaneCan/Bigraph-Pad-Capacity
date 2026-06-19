@@ -1,0 +1,158 @@
+# =====================================================================
+# eVTOL Vertiport - Structure V1 : 1 FATO + 3 Stands (SBRS / CTMC)
+# ---------------------------------------------------------------------
+# Capacity model.  A *saturated* closed loop of n_evtol aircraft cycle
+#
+#   Approach --land--> FATO --clear--> TaxiIn --enter--> Stand
+#           --turnaround--> Stand(Ready) --leave--> TaxiOut
+#           --lineup--> FATO --takeoff--> (recycle to Approach)
+#
+#   Approach.AppN(a)               a in-bound aircraft holding/approaching
+#   FATO.Free | PadIn | PadOut     the single pad: free / landing / departing
+#   TaxiIn.TiN(t)                  t aircraft on the in-bound taxi route
+#   Stands.(Stand.* | Stand.* ..)  each stand is its OWN node so that the
+#                                  M stands act as M independent parallel
+#                                  servers (Empty / Svc / Rdy per stand).
+#   TaxiOut.ToN(o)                 o aircraft on the out-bound taxi route
+# Invariant: a + [pad busy] + t + (#Svc + #Rdy) + o = n_evtol.
+#
+# Throughput (flights/hour):  Each take-off counts as one flight. 
+#
+# Time unit = minutes; rates per-minute.  n_evtol via  -c n_evtol=3 (3/4/5).
+# =====================================================================
+
+# ---------- the single touch-down / lift-off pad ----------
+ctrl FATO       = 0;
+atomic ctrl Free   = 0;        # pad is free
+atomic ctrl PadIn  = 0;        # pad occupied by a landing aircraft
+atomic ctrl PadOut = 0;        # pad occupied by a departing aircraft
+
+# ---------- counted locations ----------
+ctrl Approach   = 0;  atomic fun ctrl AppN(k) = 0;   # k in-bound holding
+ctrl TaxiIn     = 0;  atomic fun ctrl TiN(k)  = 0;   # k taxiing in
+ctrl TaxiOut    = 0;  atomic fun ctrl ToN(k)  = 0;   # k taxiing out
+ctrl Stands     = 0;           # the stand block (holds the individual stands)
+ctrl Stand      = 0;           # ONE parking stand = one independent server
+atomic ctrl Empty = 0;         # this stand is free
+atomic ctrl Svc   = 0;         # this stand has a turnaround in progress
+atomic ctrl Rdy   = 0;         # this stand's aircraft is ready to push back
+
+# ---------- layout constant (documentation; stands are structural below) ----------
+int m_stand = 3;               # number of stands (V1 = 3)
+
+# ---------- rates (per minute) ----------
+# Literature-calibrated: clear 30 s, taxi FATO->stand 45 s, turnaround 10 min;
+# land/takeoff 1 min; push-back 15 s, taxi to pad 40 s.
+float rate_land     = 1.0;
+float rate_clear    = 2.0;
+float rate_enter    = 1.3333333333;
+float rate_service  = 0.1;
+float rate_leave    = 4.0;     # push back from stand (15 s)
+float rate_lineup   = 1.5;     # taxi to FATO pad (40 s)
+float rate_takeoff  = 1.0;
+
+# ---------- integer reward weight (MUST equal rate_takeoff) ----------
+int rew_takeoff = 1;           # = rate_takeoff
+
+# =====================================================================
+# Reaction rules (parameterised by the relevant counts).
+# =====================================================================
+
+# (1) Landing: an in-bound aircraft takes the free pad.
+fun react land(a) =
+    Approach.AppN(a) | FATO.Free
+  -[rate_land]->
+    Approach.AppN(a - 1) | FATO.PadIn;
+
+# (2) Vacate the pad onto the in-bound taxi route; pad becomes free.
+fun react clear_pad(t) =
+    FATO.PadIn | TaxiIn.TiN(t)
+  -[rate_clear]->
+    FATO.Free | TaxiIn.TiN(t + 1);
+
+# (3) Taxi in and pull into a free stand; turnaround begins.
+#     Each free stand is its own node, matched independently.
+fun react enter_stand(t) =
+    TaxiIn.TiN(t) | Stands.(Stand.Empty | id)
+  -[rate_enter]->
+    TaxiIn.TiN(t - 1) | Stands.(Stand.Svc | id);
+
+# (4) Turnaround completes (Servicing -> Ready). 
+react turnaround =
+    Stands.(Stand.Svc | id)
+  -[rate_service]->
+    Stands.(Stand.Rdy | id);
+
+# (5) Push back: a ready aircraft frees its stand and joins the taxi-out.
+fun react leave_stand(o) =
+    Stands.(Stand.Rdy | id) | TaxiOut.ToN(o)
+  -[rate_leave]->
+    Stands.(Stand.Empty | id) | TaxiOut.ToN(o + 1);
+
+# (6) Taxi out and line up on the free pad for departure.
+fun react lineup(o) =
+    TaxiOut.ToN(o) | FATO.Free
+  -[rate_lineup]->
+    TaxiOut.ToN(o - 1) | FATO.PadOut;
+
+# (7) Take-off: pad clears and (saturated demand) the aircraft
+#     immediately re-enters the approach as a new in-bound operation.
+fun react takeoff(a) =
+    FATO.PadOut | Approach.AppN(a)
+  -[rate_takeoff]->
+    FATO.Free | Approach.AppN(a + 1);
+
+# =====================================================================
+# Predicates: throughput reward, utilisation labels, safety checks
+# =====================================================================
+
+# Throughput reward on pad-departing states (takeoff enabled).
+big takeoff_enabled      = FATO.PadOut;
+
+# Utilisation / congestion labels (PRISM steady-state S=?).
+big fato_landing    = FATO.PadIn;
+big fato_departing  = FATO.PadOut;
+big pad_free        = FATO.Free;
+big some_stand_free = Stands.(Stand.Empty | id);   # at least one free stand
+big stand_servicing = Stands.(Stand.Svc | id);     # at least one stand servicing
+fun big approach_waiting(a) = Approach.AppN(a);           # a >= 1
+
+# =====================================================================
+# Initial state: all n_evtol aircraft holding in-bound at the approach,
+# pad free, taxiways empty, all stands free.
+# =====================================================================
+big s0 =
+    Approach.AppN(n_evtol)
+  | FATO.Free
+  | TaxiIn.TiN(0)
+  | TaxiOut.ToN(0)
+  | Stands.(Stand.Empty | Stand.Empty | Stand.Empty);   # m_stand = 3 free stands
+
+begin sbrs
+  int a_pos   = [1:1:n_evtol];        # land / takeoff source counts (>=1 / for +1)
+  int a_any0  = [0:1:n_evtol - 1];
+  int t_pos   = [1:1:n_evtol];
+  int t_any0  = [0:1:n_evtol - 1];
+  int o_pos   = [1:1:n_evtol];
+  int o_any0  = [0:1:n_evtol - 1];
+  init s0;
+  # Single stochastic priority class: every enabled rule races by rate.
+  rules = [
+    { land(a_pos),
+      takeoff(a_any0),
+      clear_pad(t_any0),
+      enter_stand(t_pos),
+      turnaround,
+      leave_stand(o_any0),
+      lineup(o_pos) }
+  ];
+  preds = {
+    takeoff_enabled[rew_takeoff],
+    fato_landing,
+    fato_departing,
+    pad_free,
+    some_stand_free,
+    stand_servicing,
+    approach_waiting(a_pos)
+  };
+end

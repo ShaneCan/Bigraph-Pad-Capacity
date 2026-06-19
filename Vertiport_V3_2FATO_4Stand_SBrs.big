@@ -1,0 +1,219 @@
+# =====================================================================
+# eVTOL Vertiport - Structure V3 : Small FATO + Large FATO + 4 Stands
+#                                  with Small / Large eVTOL classes (SBRS)
+# ---------------------------------------------------------------------
+# Two parallel pads serve two aircraft classes that SHARE the stand pool.
+# LargeFATO has priority for large aircraft, but can also serve small aircraft
+# when no large aircraft is waiting on the corresponding approach/taxi queue.
+#
+# Counter encoding per class (S = small, L = large):
+#   Approach.(AppS(.) | AppL(.))      aircraft holding/approaching
+#   SmallFATO / LargeFATO in {Free,PadIn,PadOut}
+#   TaxiIn.(TiS(.) | TiL(.))          aircraft taxiing in
+#   TaxiOut.(ToS(.) | ToL(.))         aircraft taxiing out
+#   Stands.(Stand.* | Stand.* ..)     each stand is its OWN node; per-stand
+#                                     states {Empty, SvcS, SvcL, RdyS, RdyL}
+#
+# Mix is set on the command line:  -c n_small=2,n_large=2   (total = N).
+# OPH = 60 * R=?[S]  (every landing and take-off is one operation).
+# Time unit = minutes; rates per minute.
+#
+# =====================================================================
+
+# ---------- the two pads ----------
+ctrl SmallFATO = 0;
+ctrl LargeFATO = 0;
+atomic ctrl Free   = 0;
+atomic ctrl PadIn  = 0;
+atomic ctrl PadOut = 0;
+atomic ctrl PadInS = 0;        # small aircraft using LargeFATO
+atomic ctrl PadOutS = 0;       # small aircraft using LargeFATO
+
+# ---------- counted locations (split by class) ----------
+ctrl Approach = 0;  atomic fun ctrl AppS(k) = 0;  atomic fun ctrl AppL(k) = 0;
+ctrl TaxiIn   = 0;  atomic fun ctrl TiS(k)  = 0;  atomic fun ctrl TiL(k)  = 0;
+ctrl TaxiOut  = 0;  atomic fun ctrl ToS(k)  = 0;  atomic fun ctrl ToL(k)  = 0;
+ctrl Stands   = 0;
+ctrl Stand    = 0;
+atomic ctrl Empty = 0;   # stand free
+atomic ctrl SvcS  = 0;   # small aircraft in turnaround
+atomic ctrl SvcL  = 0;   # large aircraft in turnaround
+atomic ctrl RdyS  = 0;   # small aircraft ready to push back
+atomic ctrl RdyL  = 0;   # large aircraft ready to push back
+
+# ---------- layout constant ----------
+int m_stand = 4;                 # shared stands (V3 = 4)
+
+# ---------- rates (per minute) ----------
+float rate_land_s    = 1.0;
+float rate_land_l    = 1.0;
+float rate_clear     = 2.0;
+float rate_enter     = 1.3333333333;
+float rate_service   = 0.1;
+float rate_leave     = 4.0;     # push back (15 s)
+float rate_lineup    = 1.5;     # taxi to pad (40 s)
+float rate_takeoff_s = 1.0;
+float rate_takeoff_l = 1.0;
+
+# ---------- integer reward weights (MUST equal the rule rates) ----------
+int rew_takeoff_s = 1;
+int rew_takeoff_l = 1;
+
+# =====================================================================
+# Reaction rules - SMALL eVTOL
+# =====================================================================
+fun react land_s(a) =
+    Approach.(AppS(a) | id) | SmallFATO.Free
+  -[rate_land_s]->
+    Approach.(AppS(a - 1) | id) | SmallFATO.PadIn;
+
+# Small eVTOL can land on LargeFATO when no large aircraft is waiting.
+fun react land_s_large(a) =
+    Approach.(AppS(a) | AppL(0) | id) | LargeFATO.Free
+  -[rate_land_s]->
+    Approach.(AppS(a - 1) | AppL(0) | id) | LargeFATO.PadInS;
+
+fun react clear_s(t) =
+    SmallFATO.PadIn | TaxiIn.(TiS(t) | id)
+  -[rate_clear]->
+    SmallFATO.Free | TaxiIn.(TiS(t + 1) | id);
+
+fun react clear_s_large(t) =
+    LargeFATO.PadInS | TaxiIn.(TiS(t) | id)
+  -[rate_clear]->
+    LargeFATO.Free | TaxiIn.(TiS(t + 1) | id);
+
+fun react enter_s(t) =
+    TaxiIn.(TiS(t) | id) | Stands.(Stand.Empty | id)
+  -[rate_enter]->
+    TaxiIn.(TiS(t - 1) | id) | Stands.(Stand.SvcS | id);
+
+react turn_s =
+    Stands.(Stand.SvcS | id)
+  -[rate_service]->
+    Stands.(Stand.RdyS | id);
+
+fun react leave_s(o) =
+    Stands.(Stand.RdyS | id) | TaxiOut.(ToS(o) | id)
+  -[rate_leave]->
+    Stands.(Stand.Empty | id) | TaxiOut.(ToS(o + 1) | id);
+
+fun react lineup_s(o) =
+    TaxiOut.(ToS(o) | id) | SmallFATO.Free
+  -[rate_lineup]->
+    TaxiOut.(ToS(o - 1) | id) | SmallFATO.PadOut;
+
+fun react lineup_s_large(o) =
+    TaxiOut.(ToS(o) | ToL(0) | id) | LargeFATO.Free
+  -[rate_lineup]->
+    TaxiOut.(ToS(o - 1) | ToL(0) | id) | LargeFATO.PadOutS;
+
+fun react takeoff_s(a) =
+    SmallFATO.PadOut | Approach.(AppS(a) | id)
+  -[rate_takeoff_s]->
+    SmallFATO.Free | Approach.(AppS(a + 1) | id);
+
+fun react takeoff_s_large(a) =
+    LargeFATO.PadOutS | Approach.(AppS(a) | id)
+  -[rate_takeoff_s]->
+    LargeFATO.Free | Approach.(AppS(a + 1) | id);
+
+# =====================================================================
+# Reaction rules - LARGE eVTOL
+# =====================================================================
+fun react land_l(a) =
+    Approach.(AppL(a) | id) | LargeFATO.Free
+  -[rate_land_l]->
+    Approach.(AppL(a - 1) | id) | LargeFATO.PadIn;
+
+fun react clear_l(t) =
+    LargeFATO.PadIn | TaxiIn.(TiL(t) | id)
+  -[rate_clear]->
+    LargeFATO.Free | TaxiIn.(TiL(t + 1) | id);
+
+fun react enter_l(t) =
+    TaxiIn.(TiL(t) | id) | Stands.(Stand.Empty | id)
+  -[rate_enter]->
+    TaxiIn.(TiL(t - 1) | id) | Stands.(Stand.SvcL | id);
+
+react turn_l =
+    Stands.(Stand.SvcL | id)
+  -[rate_service]->
+    Stands.(Stand.RdyL | id);
+
+fun react leave_l(o) =
+    Stands.(Stand.RdyL | id) | TaxiOut.(ToL(o) | id)
+  -[rate_leave]->
+    Stands.(Stand.Empty | id) | TaxiOut.(ToL(o + 1) | id);
+
+fun react lineup_l(o) =
+    TaxiOut.(ToL(o) | id) | LargeFATO.Free
+  -[rate_lineup]->
+    TaxiOut.(ToL(o - 1) | id) | LargeFATO.PadOut;
+
+fun react takeoff_l(a) =
+    LargeFATO.PadOut | Approach.(AppL(a) | id)
+  -[rate_takeoff_l]->
+    LargeFATO.Free | Approach.(AppL(a + 1) | id);
+
+# =====================================================================
+# Predicates: throughput reward, utilisation labels, safety checks
+# =====================================================================
+big takeoff_s_enabled = SmallFATO.PadOut;
+big takeoff_s_large_enabled = LargeFATO.PadOutS;
+big takeoff_l_enabled = LargeFATO.PadOut;
+
+big small_pad_landing   = SmallFATO.PadIn;
+big small_pad_departing = SmallFATO.PadOut;
+big large_pad_landing   = LargeFATO.PadIn;
+big large_pad_departing = LargeFATO.PadOut;
+big large_pad_landing_small   = LargeFATO.PadInS;
+big large_pad_departing_small = LargeFATO.PadOutS;
+big some_stand_free     = Stands.(Stand.Empty | id);
+big stand_servicingS    = Stands.(Stand.SvcS | id);
+big stand_servicingL    = Stands.(Stand.SvcL | id);
+
+# =====================================================================
+# Initial state: n_small small + n_large large aircraft holding in-bound,
+# both pads free, taxiways empty, all stands free.
+# =====================================================================
+big s0 =
+    Approach.(AppS(n_small) | AppL(n_large))
+  | SmallFATO.Free
+  | LargeFATO.Free
+  | TaxiIn.(TiS(0) | TiL(0))
+  | TaxiOut.(ToS(0) | ToL(0))
+  | Stands.(Stand.Empty | Stand.Empty | Stand.Empty | Stand.Empty);
+
+begin sbrs
+  int aS_pos  = [1:1:n_small];   int aS_any0 = [0:1:n_small - 1];
+  int aL_pos  = [1:1:n_large];   int aL_any0 = [0:1:n_large - 1];
+  int tS_pos  = [1:1:n_small];   int tS_any0 = [0:1:n_small - 1];
+  int tL_pos  = [1:1:n_large];   int tL_any0 = [0:1:n_large - 1];
+  int oS_pos  = [1:1:n_small];   int oS_any0 = [0:1:n_small - 1];
+  int oL_pos  = [1:1:n_large];   int oL_any0 = [0:1:n_large - 1];
+  init s0;
+  rules = [
+    { land_s(aS_pos),  land_s_large(aS_pos),
+      takeoff_s(aS_any0), takeoff_s_large(aS_any0),
+      clear_s(tS_any0), clear_s_large(tS_any0),
+      enter_s(tS_pos), turn_s, leave_s(oS_any0), lineup_s(oS_pos),
+      lineup_s_large(oS_pos),
+      land_l(aL_pos),  takeoff_l(aL_any0),  clear_l(tL_any0),
+      enter_l(tL_pos), turn_l, leave_l(oL_any0), lineup_l(oL_pos) }
+  ];
+  preds = {
+    takeoff_s_enabled[rew_takeoff_s],
+    takeoff_s_large_enabled[rew_takeoff_s],
+    takeoff_l_enabled[rew_takeoff_l],
+    small_pad_landing,
+    small_pad_departing,
+    large_pad_landing,
+    large_pad_departing,
+    large_pad_landing_small,
+    large_pad_departing_small,
+    some_stand_free,
+    stand_servicingS,
+    stand_servicingL
+  };
+end

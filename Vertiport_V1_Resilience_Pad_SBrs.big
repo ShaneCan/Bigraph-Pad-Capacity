@@ -1,0 +1,110 @@
+# =====================================================================
+# eVTOL Vertiport - V1 saturated resilience: PAD closure only
+# ---------------------------------------------------------------------
+# Isolated pad fault/repair on top of the baseline V1 layout.
+#   FATO.Free <-> FATO.Closed  (fault_rate / repair_rate via -c)
+# Mean repair time = 1/repair_rate  (default repair_rate=0.1 -> 10 min)
+#
+# Command line:  -c n_evtol=6,fault_rate=0.05,repair_rate=0.1
+# =====================================================================
+
+ctrl FATO       = 0;
+atomic ctrl Free   = 0;
+atomic ctrl PadIn  = 0;
+atomic ctrl PadOut = 0;
+atomic ctrl Closed = 0;
+
+ctrl Approach   = 0;  atomic fun ctrl AppN(k) = 0;
+ctrl TaxiIn     = 0;  atomic fun ctrl TiN(k)  = 0;
+ctrl TaxiOut    = 0;  atomic fun ctrl ToN(k)  = 0;
+ctrl Stands     = 0;
+ctrl Stand      = 0;
+atomic ctrl Empty = 0;
+atomic ctrl Svc   = 0;
+atomic ctrl Rdy   = 0;
+
+int m_stand = 3;
+
+float rate_land     = 1.0;
+float rate_clear    = 2.0;
+float rate_enter    = 1.3333333333;
+float rate_service  = 0.1;
+float rate_leave    = 4.0;
+float rate_lineup   = 1.5;
+float rate_takeoff  = 1.0;
+
+int rew_takeoff = 1;
+
+fun react land(a) =
+    Approach.AppN(a) | FATO.Free
+  -[rate_land]->
+    Approach.AppN(a - 1) | FATO.PadIn;
+
+fun react clear_pad(t) =
+    FATO.PadIn | TaxiIn.TiN(t)
+  -[rate_clear]->
+    FATO.Free | TaxiIn.TiN(t + 1);
+
+fun react enter_stand(t) =
+    TaxiIn.TiN(t) | Stands.(Stand.Empty | id)
+  -[rate_enter]->
+    TaxiIn.TiN(t - 1) | Stands.(Stand.Svc | id);
+
+react turnaround =
+    Stands.(Stand.Svc | id)
+  -[rate_service]->
+    Stands.(Stand.Rdy | id);
+
+fun react leave_stand(o) =
+    Stands.(Stand.Rdy | id) | TaxiOut.ToN(o)
+  -[rate_leave]->
+    Stands.(Stand.Empty | id) | TaxiOut.ToN(o + 1);
+
+fun react lineup(o) =
+    TaxiOut.ToN(o) | FATO.Free
+  -[rate_lineup]->
+    TaxiOut.ToN(o - 1) | FATO.PadOut;
+
+fun react takeoff(a) =
+    FATO.PadOut | Approach.AppN(a)
+  -[rate_takeoff]->
+    FATO.Free | Approach.AppN(a + 1);
+
+react pad_fault =
+    FATO.Free -[fault_rate]-> FATO.Closed;
+
+react pad_repair =
+    FATO.Closed -[repair_rate]-> FATO.Free;
+
+big takeoff_enabled      = FATO.PadOut;
+big pad_closed           = FATO.Closed;
+big pad_landing          = FATO.PadIn;
+big pad_departing        = FATO.PadOut;
+big some_stand_free      = Stands.(Stand.Empty | id);
+
+big s0 =
+    Approach.AppN(n_evtol)
+  | FATO.Free
+  | TaxiIn.TiN(0)
+  | TaxiOut.ToN(0)
+  | Stands.(Stand.Empty | Stand.Empty | Stand.Empty);
+
+begin sbrs
+  int a_pos   = [1:1:n_evtol];   int a_any0 = [0:1:n_evtol - 1];
+  int t_pos   = [1:1:n_evtol];   int t_any0 = [0:1:n_evtol - 1];
+  int o_pos   = [1:1:n_evtol];   int o_any0 = [0:1:n_evtol - 1];
+  init s0;
+  rules = [
+    { land(a_pos), takeoff(a_any0), clear_pad(t_any0),
+      enter_stand(t_pos), turnaround,
+      leave_stand(o_any0), lineup(o_pos),
+      pad_fault, pad_repair }
+  ];
+  preds = {
+    takeoff_enabled[rew_takeoff],
+    pad_closed,
+    pad_landing,
+    pad_departing,
+    some_stand_free
+  };
+end

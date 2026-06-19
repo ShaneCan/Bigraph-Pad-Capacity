@@ -1,0 +1,7 @@
+model,N,n_small,n_large,states,throughput,pad_utilisation,all_stands_busy_prob,small_transit_blocked,large_transit_blocked
+abstract,3,2,1,238,13.407,0.1676,0.0,0.0,0.0
+oneway,3,2,1,795,12.452,0.1557,0.0,0.00321,0.00214
+abstract,4,2,2,800,17.058,0.2132,0.2836,0.0,0.0
+oneway,4,2,2,3980,15.851,0.1981,0.237,0.00652,0.00408
+abstract,5,3,2,2238,19.722,0.2465,0.5343,0.0,0.0
+oneway,5,3,2,17280,18.559,0.232,0.4717,0.00847,0.00569

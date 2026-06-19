@@ -4,8 +4,7 @@
 // BigraphER exports, for every model/parameter combination:
 //     <model>.tra    transition matrix (CTMC, rate-labelled)
 //     <model>.csl    label definitions (atomic propositions over state x)
-//     <model>.rews   state rewards (the OPH reward = sum of enabled
-//                    land/take-off rates in each state)
+//     <model>.rews   state rewards (throughput = 60 × R=?[S])
 //
 // PRISM is invoked as
 //     prism -importtrans <model>.tra \
@@ -19,20 +18,14 @@
 // the meaning of each query.
 // =====================================================================
 
-// ---- Capacity / throughput (operations per hour = 60 * value) -------
-// Long-run average reward = operations per minute.
+// ---- Capacity / throughput (flights per hour = 60 × R=?[S]) -------
+// State reward on pad-departing.
+// Each take-off = one flight.
 R=? [ S ]
 
-// Transient accumulated operations over a finite horizon (Port-style).
-const double t;
-R=? [ C<=t ]
-
-// Instantaneous reward rate at time t, useful for recovery curves.
-R=? [ I=t ]
-
 // ---- Pad utilisation (single-pad layouts V1 / V2) -------------------
-S=? [ "tlof_landing" ]      // P(pad busy with a landing)
-S=? [ "tlof_departing" ]    // P(pad busy with a departure)
+S=? [ "fato_landing" ]      // P(pad busy with a landing)
+S=? [ "fato_departing" ]    // P(pad busy with a departure)
 S=? [ "pad_free" ]          // P(pad idle / available)
 
 // ---- Pad utilisation (dual-pad layout V3) ---------------------------
@@ -40,6 +33,8 @@ S=? [ "small_pad_landing" ]
 S=? [ "small_pad_departing" ]
 S=? [ "large_pad_landing" ]
 S=? [ "large_pad_departing" ]
+S=? [ "large_pad_landing_small" ]     // small aircraft using LargeFATO
+S=? [ "large_pad_departing_small" ]   // small aircraft using LargeFATO
 
 // ---- Congestion -----------------------------------------------------
 S=? [ "all_stands_busy" ]   // P(every stand occupied)
@@ -58,17 +53,10 @@ S=? [ "approach_full" ]
 //   L = sum_i i * S=?["app_count_i"] + ...
 //   delay = L / (lambda_eff), lambda_eff = arrival_rate * (1-P_block)
 
-// ---- Safety (must be 0 : exclusive resources never double-booked) ----
-P=? [ F "er_pad_conflict" ]
-// V3:
-P=? [ F "er_small_pad_conflict" ]
-P=? [ F "er_large_pad_conflict" ]
-
-// ---- Resilience (Vertiport_V1_Resilience_SBrs) ----------------------
-S=? [ "pad_closed" ]        // long-run pad unavailability
-S=? [ "weather_bad" ]       // long-run weather disruption probability
-S=? [ "stands_out_1" ]      // at least one failed stand (scripts sum labels)
-P=? [ F<=t "nominal" ]      // recoverability / time-to-nominal distribution
-// OPH (R=?[S]) is re-evaluated while sweeping fault_rate to obtain the
-// capacity-degradation curve.  Robustness is computed in Python as
-// R_b = OPH_degraded / OPH_nominal (Das-style).
+// ---- Resilience (Vertiport_V1_Resilience_*_SBrs) --------------------
+// Pad:    S=? [ "pad_closed" ]
+// Stand:  S=? [ "stands_out_1" ]
+// Weather: S=? [ "weather_bad" ], S=? [ "nominal" ]
+// Turnaround: rate_service via -c (no fault states)
+// Throughput (R=?[S]) is evaluated while sweeping fault_rate or turnaround time;
+// fig4 compares degraded throughput against the plain V1 nominal baseline at N=6.

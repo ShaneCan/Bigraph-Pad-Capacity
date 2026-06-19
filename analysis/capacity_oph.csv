@@ -1,0 +1,19 @@
+model,layout,N,states,throughput,pad_utilisation,all_stands_busy_prob,estimated
+V1,1 FATO / 3 stands,4,135,13.831,0.3458,0.5353,false
+V1,1 FATO / 3 stands,5,235,14.867,0.3717,0.6474,false
+V1,1 FATO / 3 stands,6,365,15.447,0.3862,0.7104,false
+V1,1 FATO / 3 stands,7,525,15.79,0.3947,0.7475,false
+V1,1 FATO / 3 stands,8,715,15.998,0.4,0.77,false
+V1,1 FATO / 3 stands,9,935,16.129,0.4032,0.784,false
+V2,1 FATO / 4 stands,4,140,15.088,0.3772,0.2043,false
+V2,1 FATO / 4 stands,5,260,16.999,0.425,0.3562,false
+V2,1 FATO / 4 stands,6,425,18.193,0.4548,0.4546,false
+V2,1 FATO / 4 stands,7,635,18.984,0.4746,0.5205,false
+V2,1 FATO / 4 stands,8,890,19.54,0.4885,0.5667,false
+V2,1 FATO / 4 stands,9,1190,19.948,0.4987,0.6006,false
+V3,2 FATO / 4 stands one-way (2S+2L),4,3980,15.851,0.1981,0.237,false
+V3,2 FATO / 4 stands one-way (3S+2L),5,17280,18.559,0.232,0.4717,false
+V3,2 FATO / 4 stands one-way predicted (3S+3L; abstract x Fig.5 N=5 ratio),6,5440,19.698,0.2462,0.6674,true
+V3,2 FATO / 4 stands one-way predicted (4S+3L; abstract x Fig.5 N=5 ratio),7,11724,20.472,0.2559,0.7608,true
+V3,2 FATO / 4 stands one-way predicted (4S+4L; abstract x Fig.5 N=5 ratio),8,22642,20.794,0.2599,0.8029,true
+V3,2 FATO / 4 stands one-way predicted (5S+4L; abstract x Fig.5 N=5 ratio),9,40462,21.002,0.2625,0.83,true
