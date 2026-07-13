@@ -14,19 +14,18 @@
 // below (the label definitions must precede the queries).  Gauss-Seidel
 // (-gs) is required for the steady-state solves to converge.
 //
-// The analysis scripts assemble these automatically; this file documents
-// the meaning of each query.
+// scripts/run_analysis.py assembles these automatically from the .csl
+// labels; this file documents the meaning of each query for manual runs.
 // =====================================================================
 
 // ---- Capacity / throughput (flights per hour = 60 × R=?[S]) -------
-// State reward on pad-departing.
-// Each take-off = one flight.
+// State reward on pad-departing (takeoff-enabled) states only.
 R=? [ S ]
 
 // ---- Pad utilisation (single-pad layouts V1 / V2) -------------------
 S=? [ "fato_landing" ]      // P(pad busy with a landing)
 S=? [ "fato_departing" ]    // P(pad busy with a departure)
-S=? [ "pad_free" ]          // P(pad idle / available)
+// Pad utilisation (script) = S=?["fato_landing"] + S=?["fato_departing"]
 
 // ---- Pad utilisation (dual-pad layout V3) ---------------------------
 S=? [ "small_pad_landing" ]
@@ -35,28 +34,65 @@ S=? [ "large_pad_landing" ]
 S=? [ "large_pad_departing" ]
 S=? [ "large_pad_landing_small" ]     // small aircraft using LargeFATO
 S=? [ "large_pad_departing_small" ]   // small aircraft using LargeFATO
+// Pad utilisation (script) = (small_pad + large_pad util) / 2
 
-// ---- Congestion -----------------------------------------------------
-S=? [ "all_stands_busy" ]   // P(every stand occupied)
+// ---- Stand congestion -----------------------------------------------
+// some_stand_free = at least one stand is Empty (see .big preds).
+S=? [ !"some_stand_free" ]   // P(every stand occupied — Svc or Rdy)
+
+// ---- Stand utilisation (V1 / V2: M = 3 or 4 stands) ----------------
+// Occupied = Stand.Svc (turnaround) or Stand.Rdy (ready to depart).
+// Each stand is an independent node, so counts use cumulative labels:
+//   svc_at_least_k  ↔  at least k stands in Svc
+//   rdy_at_least_k  ↔  at least k stands in Rdy
+// Query k = 1 .. M for each prefix (M = 3 for V1, M = 4 for V2).
+//
+// Example for V1 (M=3):
+S=? [ "svc_at_least_1" ]
+S=? [ "svc_at_least_2" ]
+S=? [ "svc_at_least_3" ]
+S=? [ "rdy_at_least_1" ]
+S=? [ "rdy_at_least_2" ]
+S=? [ "rdy_at_least_3" ]
+//
+// Post-process (same as run_analysis.mean_stand_utilisation):
+//   E[Svc] = P(≥1) + P(≥2) + … + P(≥M)
+//   E[Rdy] = P(≥1) + P(≥2) + … + P(≥M)
+//   stand_utilisation = (E[Svc] + E[Rdy]) / M
+
+// ---- Stand utilisation (V3: M = 4 stands, four stand-state types) ---
+// Query k = 1 .. 4 for each prefix:
+//   svcS_at_least_k, svcL_at_least_k, rdyS_at_least_k, rdyL_at_least_k
+//
+// Post-process:
+//   occupied = E[svcS] + E[svcL] + E[rdyS] + E[rdyL]
+//   stand_utilisation = occupied / 4
 
 // ---- V3 one-way transit blocking ------------------------------------
-// Labels are parameterised by waiting count; scripts query _1/_2 as needed.
 S=? [ "small_transit_blocked_1" ]
 S=? [ "large_transit_blocked_1" ]
 
 // ---- Open M/M/c/K arrivals (Vertiport_V1_Open / V2_Open) -------------
-// Blocking/loss probability by PASTA: external arrivals see time averages.
-S=? [ "approach_full" ]
-// Mean counts are computed by scripts from labels app_count_i,
-// taxi_in_count_i, taxi_out_count_i, svc_count_i, rdy_count_i,
-// pad_in_system and pad_out_system:
-//   L = sum_i i * S=?["app_count_i"] + ...
-//   delay = L / (lambda_eff), lambda_eff = arrival_rate * (1-P_block)
+S=? [ "approach_full" ]   // PASTA blocking/loss probability
+//
+// Mean in system L is computed by scripts from:
+//   app_count_i, taxi_in_count_i, taxi_out_count_i  (exact counts, i = 0..k)
+//   svc_at_least_k, rdy_at_least_k                  (cumulative, k = 1..M)
+//   pad_in_system, pad_out_system
+//
+//   L = sum_i i·S=?["app_count_i"] + … + E[Svc] + E[Rdy] + P(pad_in) + P(pad_out)
+//   E[Svc] = sum_k S=?["svc_at_least_k"]   (same tail-sum formula as above)
+//   delay = L / lambda_eff,  lambda_eff = arr_rate × (1 − P_block)
 
 // ---- Resilience (Vertiport_V1_Resilience_*_SBrs) --------------------
-// Pad:    S=? [ "pad_closed" ]
-// Stand:  S=? [ "stands_out_1" ]
+// Pad:     S=? [ "pad_closed" ]
+// Stand:   S=? [ "stands_out_1" ]
 // Weather: S=? [ "weather_bad" ], S=? [ "nominal" ]
 // Turnaround: rate_service via -c (no fault states)
 // Throughput (R=?[S]) is evaluated while sweeping fault_rate or turnaround time;
 // fig4 compares degraded throughput against the plain V1 nominal baseline at N=6.
+
+// ---- Pad recovery (Vertiport_V1_Recovery_PadClosed) -----------------
+// Initial state: FATO.Closed; repair only (no fault).
+const double t;
+R=? [ I=t ]                    // instant take-off rate (×60 = flights/hour, fig4 right)

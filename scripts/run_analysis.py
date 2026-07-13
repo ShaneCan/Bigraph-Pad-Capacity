@@ -8,11 +8,12 @@ For each model / parameter point it
   3. writes tidy CSV files into  analysis/.
 
 Outputs
-  analysis/capacity_oph.csv       fig1 — V1/V2/V3 (one-way) capacity vs N
-  analysis/open_v1_v2.csv         fig2 — open V1/V2 vs lambda
-  analysis/v3_mix.csv             fig3 — V3 one-way traffic mix at N=5
-  analysis/resilience_oph.csv     fig4 — V1 isolated fault / turnaround throughput
-  analysis/v3_oneway.csv          fig3 — abstract vs one-way comparison
+  analysis/fig1_capacity_oph.csv        fig1 — V1/V2/V3 capacity vs N (N = 4..8)
+  analysis/fig2_open_v1_v2.csv          fig2 — open V1/V2 vs lambda
+  analysis/fig3_sensitivity_oph.csv     fig3 — V1 steady-state fault / turnaround sensitivity
+  analysis/fig4_recovery_throughput.csv fig4 — pad-closed transient throughput R=?[I=t]
+  analysis/fig5_compound_recovery.csv   fig5 — pad-closed + k stands out recovery erosion
+  analysis/fig6_compound_capacity.csv   fig6 — sustained capacity (weather × stands out)
 
 Run
   python3 scripts/run_analysis.py              # all modules
@@ -97,75 +98,83 @@ def first_result(tra, csl, rews, query, consts=None):
 
 
 # ---------------------------------------------------------------------
-# 1. Capacity: throughput(N) for V1, V2, V3  (N = 4, 5, 6, 7, 8, 9)
+# 1. Capacity: throughput(N) for V1, V2, V3  (N = 4, 5, 6, 7, 8)
 # ---------------------------------------------------------------------
-def v3_split(n):
-    """Balanced small/large split that sums to n (extra goes to small)."""
-    s = (n + 1) // 2
-    return s, n - s
-
-
-V3_ONEWAY = "Vertiport_V3_2FATO_4Stand_OneWay_SBrs.big"
-V3_ABSTRACT = "Vertiport_V3_2FATO_4Stand_SBrs.big"
+V3_BIDIR = "Vertiport_V3_2FATO_4Stand_BiDir_SBrs.big"
+V3_OPEN = "Vertiport_V3_Open_SBrs.big"
+M_MOVE_V3 = 8   # in-vertiport admission cap (matches m_move in the .big models)
 PRISM_MAXITERS_V3 = {
-    3: 2_000_000,
     4: 2_000_000,
     5: 8_000_000,
     6: 8_000_000,
     7: 8_000_000,
     8: 8_000_000,
-    9: 8_000_000,
 }
-V3_ESTIMATE_RATIO_FROM_N = 5
 
 
-def prism_v3_oneway(tra, csl, rews, n, *, with_transit_blocking=False):
-    """Steady-state queries shared by capacity sweep and abstract comparison."""
+def prism_v3(tra, csl, rews, n, *, with_stand_util=False):
+    """Steady-state queries for the V3 bidirectional U-taxiway model."""
     qs = [
         'R=? [ S ]',
-        'S=? [ "small_pad_landing" ]',
-        'S=? [ "small_pad_departing" ]',
-        'S=? [ "large_pad_landing" ]',
-        'S=? [ "large_pad_departing" ]',
-        'S=? [ "large_pad_landing_small" ]',
-        'S=? [ "large_pad_departing_small" ]',
+        'S=? [ "pad1_free" ]',
+        'S=? [ "pad2_free" ]',
         'S=? [ !"some_stand_free" ]',
     ]
-    if with_transit_blocking:
-        qs += [
-            'S=? [ "small_transit_blocked_1" ]',
-            'S=? [ "large_transit_blocked_1" ]',
-        ]
+    if with_stand_util:
+        qs += stand_util_queries(M_STAND["V3"])
     return prism(tra, csl, rews, qs, maxiters=PRISM_MAXITERS_V3.get(n, 2_000_000))
 
 
-def v3_oneway_scale_from_fig5():
-    """Use the highest validated Fig. 5 point as the abstract->one-way scale."""
-    n = V3_ESTIMATE_RATIO_FROM_N
-    ns_small, ns_large = v3_split(n)
-    vals = {}
-    for model, mfile in [("abstract", V3_ABSTRACT), ("oneway", V3_ONEWAY)]:
-        tag = f"V3_scale_{model}_N{n}"
-        g = generate(mfile, f"n_small={ns_small},n_large={ns_large}", tag)
-        if not g:
-            return 1.0
-        tra, csl, rews, _states = g
-        vals[model] = 60 * prism_v3_oneway(tra, csl, rews, n)[0]
-    ratio = vals["oneway"] / vals["abstract"]
-    print(f"   V3 estimate scale from Fig.5 N={n}: "
-          f"oneway/abstract={ratio:.4f}")
-    return ratio
+def v3_pad_util(r):
+    """Mean pad utilisation (fraction of the 2 pads busy) from prism_v3."""
+    e_free = r[1] + r[2]
+    return (2.0 - e_free) / 2.0
+
+
+def v3_open_interior_queries(k_taxi, max_stands=4):
+    """PRISM labels for the V3 open (taxi-abstract, 2-pad) interior count.
+
+    Interior = inbound taxi + outbound taxi + stands + both pads.  Returns
+    (queries, taxi_weights, max_stands): the two pads are counted with four
+    per-pad occupancy labels (each 0/1) so E[pads busy] = sum of their
+    probabilities."""
+    labels = []
+    weights = []
+    for prefix in ("taxi_in_count", "taxi_out_count"):
+        for i in range(k_taxi + 1):
+            labels.append(f"{prefix}_{i}")
+            weights.append(i)
+    labels += [f"svc_at_least_{k}" for k in range(1, max_stands + 1)]
+    labels += [f"rdy_at_least_{k}" for k in range(1, max_stands + 1)]
+    labels += ["pad1_landing", "pad1_departing", "pad2_landing", "pad2_departing"]
+    return [f'S=? [ "{lbl}" ]' for lbl in labels], weights, max_stands
+
+
+def mean_in_vertiport_v3(probs, taxi_weights, max_stands):
+    """Mean aircraft inside the V3 vertiport (taxi + stands + 2 pads)."""
+    idx = 0
+    total = 0.0
+    for w in taxi_weights:
+        total += w * probs[idx]
+        idx += 1
+    total += expected_from_cumulative(probs[idx:idx + max_stands], max_stands)
+    idx += max_stands
+    total += expected_from_cumulative(probs[idx:idx + max_stands], max_stands)
+    idx += max_stands
+    total += sum(probs[idx:idx + 4])   # four per-pad occupancy probabilities
+    return total
 
 
 def run_capacity():
-    print("[1/5] Capacity throughput(N) for V1/V2/V3 ...")
+    print("[1/4] Capacity throughput(N) for V1/V2/V3 ...")
     rows = []
-    fleet = [4, 5, 6, 7, 8, 9]
+    fleet = [4, 5, 6, 7, 8]
     single = [
         ("V1", "Vertiport_V1_1FATO_3Stand_SBrs.big", "1 FATO / 3 stands"),
         ("V2", "Vertiport_V2_1FATO_4Stand_SBrs.big", "1 FATO / 4 stands"),
     ]
     for key, mfile, desc in single:
+        max_stands = M_STAND[key]
         for n in fleet:
             tag = f"{key}_N{n}"
             g = generate(mfile, f"n_evtol={n}", tag)
@@ -177,117 +186,38 @@ def run_capacity():
                 'S=? [ "fato_landing" ]',
                 'S=? [ "fato_departing" ]',
                 'S=? [ !"some_stand_free" ]',   # all stands busy = no free stand
-            ])
+            ] + stand_util_queries(max_stands))
             throughput = 60 * r[0]
             pad_util = r[1] + r[2]
+            stand_util = mean_stand_utilisation(r[4:], max_stands)
             rows.append([key, desc, n, ns, round(throughput, 3),
-                         round(pad_util, 4), round(r[3], 4), "false"])
+                         round(pad_util, 4), round(stand_util, 4),
+                         round(r[3], 4), "false"])
             print(f"   {key} N={n}: states={ns} throughput={throughput:.2f} "
-                  f"pad_util={pad_util:.3f} stands_busy={r[3]:.3f}")
+                  f"pad_util={pad_util:.3f} stand_util={stand_util:.3f} "
+                  f"stands_busy={r[3]:.3f}")
 
-    v3_scale = v3_oneway_scale_from_fig5()
     for n in fleet:
-        ns_small, ns_large = v3_split(n)
-        if n <= 5:
-            mfile = V3_ONEWAY
-            tag = f"V3_oneway_N{n}"
-            layout = f"2 FATO / 4 stands one-way ({ns_small}S+{ns_large}L)"
-            estimated = "false"
-        else:
-            mfile = V3_ABSTRACT
-            tag = f"V3_abstract_capacity_N{n}"
-            layout = (
-                "2 FATO / 4 stands one-way predicted "
-                f"({ns_small}S+{ns_large}L; abstract x Fig.5 N=5 ratio)"
-            )
-            estimated = "true"
-        g = generate(mfile, f"n_small={ns_small},n_large={ns_large}", tag)
+        tag = f"V3_bidir_N{n}"
+        layout = "2 FATO / 4 stands bidirectional U-taxiway"
+        g = generate(V3_BIDIR, f"n={n}", tag)
         if not g:
             continue
         tra, csl, rews, ns = g
-        r = prism_v3_oneway(tra, csl, rews, n)
+        r = prism_v3(tra, csl, rews, n, with_stand_util=True)
         throughput = 60 * r[0]
-        large_pad_util = r[3] + r[4] + r[5] + r[6]
-        pad_util = (r[1] + r[2] + large_pad_util) / 2.0   # avg of the two pads
-        if estimated == "true":
-            throughput *= v3_scale
-            pad_util *= v3_scale
-            print(f"   V3 abstract N={n}: states={ns} "
-                  f"estimated throughput={throughput:.2f}")
-        else:
-            print(f"   V3 one-way N={n}: states={ns} throughput={throughput:.2f} "
-                  f"pad_util={pad_util:.3f} stands_busy={r[7]:.3f}")
+        pad_util = v3_pad_util(r)
+        stand_util = mean_stand_utilisation(r[4:], M_STAND["V3"])
+        print(f"   V3 bidir N={n}: states={ns} throughput={throughput:.2f} "
+              f"pad_util={pad_util:.3f} stand_util={stand_util:.3f} "
+              f"stands_busy={r[3]:.3f}")
         rows.append(["V3", layout, n, ns, round(throughput, 3), round(pad_util, 4),
-                     round(r[7], 4), estimated])
+                     round(stand_util, 4), round(r[3], 4), "false"])
 
-    write_csv("capacity_oph.csv",
+    write_csv("fig1_capacity_oph.csv",
               ["model", "layout", "N", "states", "throughput",
-               "pad_utilisation", "all_stands_busy_prob", "estimated"],
-              rows)
-
-
-# ---------------------------------------------------------------------
-# 2. V3 traffic mix sensitivity (fig3: N = 5 only)
-# ---------------------------------------------------------------------
-def run_mix(fleet=None):
-    fleet = fleet or [5]
-    print(f"[mix] V3 one-way traffic-mix sensitivity at N={fleet} ...")
-    rows = []
-    for total in fleet:
-        for ns_small in range(0, total + 1):
-            ns_large = total - ns_small
-            tag = f"V3_oneway_mix_N{total}_{ns_small}S{ns_large}L"
-            g = generate(V3_ONEWAY, f"n_small={ns_small},n_large={ns_large}", tag)
-            if not g:
-                print(f"   N={total} skip {ns_small}S+{ns_large}L (generation failed)")
-                continue
-            tra, csl, rews, ns = g
-            r = prism_v3_oneway(tra, csl, rews, total)
-            throughput = 60 * r[0]
-            large_pad_util = r[3] + r[4] + r[5] + r[6]
-            rows.append([ns_small, ns_large, total, ns, round(throughput, 3),
-                         round(r[1] + r[2], 4), round(large_pad_util, 4)])
-            print(f"   N={total} {ns_small}S+{ns_large}L: states={ns} throughput={throughput:.2f}")
-    write_csv("v3_mix.csv",
-              ["n_small", "n_large", "N", "states", "throughput",
-               "small_pad_util", "large_pad_util"],
-              rows)
-
-
-# ---------------------------------------------------------------------
-# 3. V3 one-way realism: abstracted vs de-abstracted taxiways (fig3 panels 2-3)
-# ---------------------------------------------------------------------
-def run_v3_oneway():
-    print("[3/5] V3 abstract vs one-way taxiways (fig3) ...")
-    rows = []
-    cases = [(3, 2, 1), (4, 2, 2), (5, 3, 2)]
-    for n, ns_small, ns_large in cases:
-        for model, mfile in [
-            ("abstract", V3_ABSTRACT),
-            ("oneway", V3_ONEWAY),
-        ]:
-            tag = f"V3_{model}_N{n}"
-            g = generate(mfile, f"n_small={ns_small},n_large={ns_large}", tag)
-            if not g:
-                continue
-            tra, csl, rews, states = g
-            if model == "abstract":
-                r = prism_v3_oneway(tra, csl, rews, n)
-                small_block, large_block = 0.0, 0.0
-            else:
-                r = prism_v3_oneway(tra, csl, rews, n, with_transit_blocking=True)
-                small_block, large_block = r[8], r[9]
-            throughput = 60 * r[0]
-            large_pad_util = r[3] + r[4] + r[5] + r[6]
-            pad_util = (r[1] + r[2] + large_pad_util) / 2.0
-            rows.append([model, n, ns_small, ns_large, states, round(throughput, 3),
-                         round(pad_util, 4), round(r[7], 4),
-                         round(small_block, 5), round(large_block, 5)])
-            print(f"   V3 {model} N={n}: states={states} throughput={throughput:.2f}")
-    write_csv("v3_oneway.csv",
-              ["model", "N", "n_small", "n_large", "states", "throughput",
-               "pad_utilisation", "all_stands_busy_prob",
-               "small_transit_blocked", "large_transit_blocked"],
+               "pad_utilisation", "stand_utilisation",
+               "all_stands_busy_prob", "estimated"],
               rows)
 
 
@@ -296,48 +226,78 @@ def expected_from_cumulative(at_least_probs, max_k):
     return sum(at_least_probs[:max_k])
 
 
-def open_count_queries(k_app, k_taxi, max_stands):
+M_STAND = {"V1": 3, "V2": 4, "V3": 4}
+
+
+def stand_util_queries(max_stands):
+    """PRISM steady-state labels for mean stand occupancy."""
     labels = []
-    weights = []
+    for prefix in ("svc_at_least_", "rdy_at_least_"):
+        for k in range(1, max_stands + 1):
+            labels.append(f"{prefix}{k}")
+    return [f'S=? [ "{label}" ]' for label in labels]
+
+
+def mean_stand_utilisation(at_least_probs, max_stands):
+    """Average fraction of stands occupied (Svc or Rdy)."""
+    idx = 0
+    occupied = 0.0
+    for _ in range(2):
+        occupied += expected_from_cumulative(
+            at_least_probs[idx:idx + max_stands], max_stands,
+        )
+        idx += max_stands
+    return occupied / max_stands
+
+
+def vertiport_count_queries(k_taxi, max_stands):
+    """PRISM steady-state labels for mean vertiport-interior occupancy."""
+    labels = []
+    count_weights = []
     for prefix, max_value in [
-        ("app_count", k_app),
         ("taxi_in_count", k_taxi),
         ("taxi_out_count", k_taxi),
     ]:
         for i in range(max_value + 1):
-            labels.append(f'{prefix}_{i}')
-            weights.append(i)
-    svc_labels = [f'svc_at_least_{k}' for k in range(1, max_stands + 1)]
-    rdy_labels = [f'rdy_at_least_{k}' for k in range(1, max_stands + 1)]
-    labels += svc_labels + rdy_labels + ["pad_in_system", "pad_out_system"]
-    weights += [1, 1]
-    return [f'S=? [ "{label}" ]' for label in labels], weights, max_stands
+            labels.append(f"{prefix}_{i}")
+            count_weights.append(i)
+    labels += [f"svc_at_least_{k}" for k in range(1, max_stands + 1)]
+    labels += [f"rdy_at_least_{k}" for k in range(1, max_stands + 1)]
+    labels += ["pad_in_system", "pad_out_system"]
+    return [f'S=? [ "{label}" ]' for label in labels], count_weights, max_stands
 
 
-def mean_in_system_from_counts(count_probs, weights, max_stands):
-    """Little's-law mean L from exact-count and cumulative stand labels."""
+def mean_in_vertiport_from_counts(count_probs, count_weights, max_stands):
+    """Mean aircraft inside the vertiport (taxi, stands, pads only)."""
     idx = 0
-    l_system = 0.0
-    for w in weights[:-2]:
-        l_system += w * count_probs[idx]
+    l_vertiport = 0.0
+    for w in count_weights:
+        l_vertiport += w * count_probs[idx]
         idx += 1
     svc_cum = count_probs[idx:idx + max_stands]
     idx += max_stands
     rdy_cum = count_probs[idx:idx + max_stands]
     idx += max_stands
-    l_system += expected_from_cumulative(svc_cum, max_stands)
-    l_system += expected_from_cumulative(rdy_cum, max_stands)
-    l_system += count_probs[idx] + count_probs[idx + 1]
-    return l_system
+    l_vertiport += expected_from_cumulative(svc_cum, max_stands)
+    l_vertiport += expected_from_cumulative(rdy_cum, max_stands)
+    l_vertiport += count_probs[idx] + count_probs[idx + 1]
+    return l_vertiport
 
 
 # ---------------------------------------------------------------------
 # 5. Open-arrival V1/V2 (M/M/c/K with blocking)
 # ---------------------------------------------------------------------
-def run_open_v1_v2(k_app=6, k_taxi=3):
-    print("[4/5] Open V1/V2 M/M/c/K lambda sweep ...")
+def run_open(k_app=20, k_taxi=3):
+    print("[2/4] Open V1/V2/V3 M/M/c/K lambda sweep ...")
     rows = []
-    lambdas = [0.2, 0.5, 1.0, 2.0]
+    # Arrival-rate sweep spanning below-capacity to overload (V1 cap ~0.26,
+    # V2 ~0.32, V3 ~0.37 min^-1).  Buffer k_app=20 (~20-aircraft holding
+    # stack) is large enough that the mean approach-queue length is set by
+    # queueing dynamics in the stable regime; past capacity the queue
+    # saturates the holding stack (overload).
+    lambdas = [0.10, 0.20, 0.50, 1.00]
+
+    # --- V1 / V2: counter-based taxi interior --------------------------
     for model, mfile, layout, max_stands in [
         ("V1", "Vertiport_V1_Open_SBrs.big", "1 FATO / 3 stands", 3),
         ("V2", "Vertiport_V2_Open_SBrs.big", "1 FATO / 4 stands", 4),
@@ -354,18 +314,54 @@ def run_open_v1_v2(k_app=6, k_taxi=3):
             ])
             throughput = 60 * r[0]
             p_block = r[1]
-            count_qs, weights, n_stands = open_count_queries(k_app, k_taxi, max_stands)
+            count_qs, count_weights, n_stands = vertiport_count_queries(
+                k_taxi, max_stands,
+            )
             count_probs = prism(tra, csl, rews, count_qs)
-            l_system = mean_in_system_from_counts(count_probs, weights, n_stands)
+            l_vertiport = mean_in_vertiport_from_counts(
+                count_probs, count_weights, n_stands,
+            )
             lambda_eff = max(lam * (1.0 - p_block), 1e-9)
-            delay = l_system / lambda_eff
+            delay_vertiport = l_vertiport / lambda_eff
             rows.append([model, layout, lam, k_app, k_taxi, states,
                          round(throughput, 3), round(p_block, 5),
-                         round(l_system, 4), round(delay, 4)])
-            print(f"   {model} lambda={lam}: throughput={throughput:.2f} block={p_block:.3f}")
-    write_csv("open_v1_v2.csv",
+                         round(l_vertiport, 4), round(delay_vertiport, 4)])
+            print(f"   {model} lambda={lam}: throughput={throughput:.2f} "
+                  f"block={p_block:.3f} L_vp={l_vertiport:.2f} "
+                  f"W_vp={delay_vertiport:.2f}min")
+
+    # --- V3: taxi-abstract 2-pad open model (same abstraction as V1/V2),
+    # so the lambda-sweep compares all three layouts at one modelling level.
+    # (The explicit bidirectional open model is state-space intractable and
+    # its taxiway detail does not change the M/M/c/K queueing metrics.)
+    for lam in lambdas:
+        tag = f"V3_open_kapp{k_app}_ktaxi{k_taxi}_lam{lam}"
+        g = generate(V3_OPEN, f"arr_rate={lam},k_app={k_app},k_taxi={k_taxi}", tag)
+        if not g:
+            continue
+        tra, csl, rews, states = g
+        r = prism(tra, csl, rews, [
+            'R=? [ S ]',
+            'S=? [ "approach_full" ]',
+        ])
+        throughput = 60 * r[0]
+        p_block = r[1]
+        count_qs, taxi_weights, n_stands = v3_open_interior_queries(k_taxi)
+        count_probs = prism(tra, csl, rews, count_qs)
+        l_vertiport = mean_in_vertiport_v3(count_probs, taxi_weights, n_stands)
+        lambda_eff = max(lam * (1.0 - p_block), 1e-9)
+        delay_vertiport = l_vertiport / lambda_eff
+        rows.append(["V3", "2 FATO / 4 stands", lam, k_app, k_taxi,
+                     states, round(throughput, 3), round(p_block, 5),
+                     round(l_vertiport, 4), round(delay_vertiport, 4)])
+        print(f"   V3 lambda={lam}: throughput={throughput:.2f} "
+              f"block={p_block:.3f} L_vp={l_vertiport:.2f} "
+              f"W_vp={delay_vertiport:.2f}min")
+
+    write_csv("fig2_open_v1_v2.csv",
               ["model", "layout", "lambda", "k_app", "k_taxi", "states",
-               "throughput", "P_block", "mean_in_system", "mean_delay_min"],
+               "throughput", "P_block",
+               "mean_in_vertiport", "mean_delay_vertiport"],
               rows)
 
 
@@ -373,13 +369,13 @@ def run_open_v1_v2(k_app=6, k_taxi=3):
 # 6. V1 saturated resilience (isolated fault models + turnaround sweep)
 # ---------------------------------------------------------------------
 RESILIENCE_MODELS = {
-    "pad": "Vertiport_V1_Resilience_Pad_SBrs.big",
-    "stand": "Vertiport_V1_Resilience_Stand_SBrs.big",
-    "weather": "Vertiport_V1_Resilience_Weather_SBrs.big",
+    "pad": "Vertiport_V1_Sensitivity_Pad_SBrs.big",
+    "stand": "Vertiport_V1_Sensitivity_Stand_SBrs.big",
+    "weather": "Vertiport_V1_Sensitivity_Weather_SBrs.big",
 }
 RESILIENCE_REPAIR = {
-    "pad": {"repair_rate": 0.1},              # mean repair 10 min
-    "stand": {"stand_repair_rate": 0.1},      # mean repair 10 min
+    "pad": {"repair_rate": 0.1},               # mean repair 10 min
+    "stand": {"stand_repair_rate": 0.03333},  # mean repair 30 min
     "weather": {"weather_repair_rate": 0.05}, # mean recovery 20 min
 }
 RESILIENCE_RATE_KEY = {
@@ -389,9 +385,48 @@ RESILIENCE_RATE_KEY = {
 }
 TURNAROUND_MINUTES = [10, 15, 20, 30]
 
+RECOVERY_MODEL = "Vertiport_V1_Recovery_PadClosed_SBrs.big"
+RECOVERY_REPAIR_RATES = [0.05, 0.1, 0.2, 0.5]
+RECOVERY_T_STEP = 5
+RECOVERY_T_MAX = 120
+REF_TIME_MIN = 30
+
+
+def recovery_time_grid():
+    return list(range(0, RECOVERY_T_MAX + 1, RECOVERY_T_STEP))
+
+
+def run_pad_recovery(n=6):
+    print(f"[recovery] Pad-closed transient throughput R=?[I=t] (N={n}, fig4) ...")
+    rows = []
+    t_values = recovery_time_grid()
+    for rr in RECOVERY_REPAIR_RATES:
+        tag = f"V1_recovery_padclosed_N{n}_rr{rr}"
+        g = generate(RECOVERY_MODEL, f"n_evtol={n},repair_rate={rr}", tag)
+        if not g:
+            continue
+        tra, csl, rews, states = g
+        print(f"   repair_rate={rr}: states={states}")
+        for t in t_values:
+            instant = first_result(
+                tra, csl, rews, 'R=? [ I=t ]',
+                consts=f"t={t},repair_rate={rr},n_evtol={n}",
+            )
+            throughput = 60 * instant
+            rows.append([
+                rr, t, round(instant, 6), round(throughput, 3), n,
+            ])
+            if t in (0, REF_TIME_MIN, RECOVERY_T_MAX):
+                print(f"      t={t}: throughput={throughput:.2f} oph")
+    write_csv(
+        "fig4_recovery_throughput.csv",
+        ["repair_rate", "t_min", "instant_rate", "throughput_oph", "n_evtol"],
+        rows,
+    )
+
 
 def run_resilience_depth(n=6):
-    print(f"[5/5] V1 isolated resilience + turnaround (N={n}) ...")
+    print(f"[3/4] V1 isolated resilience + turnaround (N={n}) ...")
     rows = []
     g0 = generate("Vertiport_V1_1FATO_3Stand_SBrs.big", f"n_evtol={n}",
                   f"V1_nominal_N{n}")
@@ -426,7 +461,7 @@ def run_resilience_depth(n=6):
         rate_service = 1.0 / minutes
         consts = f"n_evtol={n},rate_service={rate_service}"
         tag = f"V1_turnaround_N{n}_t{minutes}"
-        g = generate("Vertiport_V1_Resilience_Turnaround_SBrs.big", consts, tag)
+        g = generate("Vertiport_V1_Sensitivity_Turnaround_SBrs.big", consts, tag)
         if not g:
             continue
         tra, csl, rews, states = g
@@ -435,22 +470,97 @@ def run_resilience_depth(n=6):
         rows.append(["turnaround", "minutes", minutes, round(throughput, 3), curve])
         print(f"   turnaround {minutes} min: states={states} throughput={throughput:.2f}")
 
-    write_csv("resilience_oph.csv",
+    write_csv("fig3_sensitivity_oph.csv",
               ["panel", "param_name", "param_value", "throughput", "curve"],
               rows)
 
 
+# ---------------------------------------------------------------------
+# 7. Compound-fault recovery erosion (fig5): pad closed + k stands out
+# ---------------------------------------------------------------------
+COMPOUND_RECOVERY_MODELS = {
+    0: "Vertiport_V1_Recovery_PadClosed_SBrs.big",     # pad closed, 0 stands out
+    1: "Vertiport_V1_Recovery_Compound_k1_SBrs.big",   # pad closed + 1 stand out
+    2: "Vertiport_V1_Recovery_Compound_k2_SBrs.big",   # pad closed + 2 stands out
+}
+COMPOUND_REPAIR_RATE = 0.1           # pad mean repair 10 min
+COMPOUND_STAND_REPAIR_RATE = 0.03333 # stand mean repair 30 min
+
+
+def run_compound_recovery(n=6):
+    """fig5 — throughput recovery after pad closure, eroded by k co-failed stands."""
+    print(f"[compound-recovery] pad-closed + k stands out, R=?[I=t] (N={n}, fig5) ...")
+    rows = []
+    t_values = recovery_time_grid()
+    for k in (0, 1, 2):
+        model = COMPOUND_RECOVERY_MODELS[k]
+        gen_consts = f"n_evtol={n},repair_rate={COMPOUND_REPAIR_RATE}"
+        if k > 0:
+            gen_consts += f",stand_repair_rate={COMPOUND_STAND_REPAIR_RATE}"
+        g = generate(model, gen_consts, f"V1_comprec_k{k}_N{n}")
+        if not g:
+            continue
+        tra, csl, rews, states = g
+        print(f"   k={k}: states={states}")
+        for t in t_values:
+            instant = first_result(tra, csl, rews, 'R=? [ I=t ]', consts=f"t={t}")
+            throughput = 60 * instant
+            rows.append([k, t, round(instant, 6), round(throughput, 3), n])
+            if t in (0, REF_TIME_MIN, RECOVERY_T_MAX):
+                print(f"      t={t}: throughput={throughput:.2f} oph")
+    write_csv("fig5_compound_recovery.csv",
+              ["k_out", "t_min", "instant_rate", "throughput_oph", "n_evtol"],
+              rows)
+
+
+# ---------------------------------------------------------------------
+# 8. Stand-outage cost under weather (fig6): capacity envelope + recovery
+# ---------------------------------------------------------------------
+COMPOUNDSW_CAP_MODELS = {
+    0: "Vertiport_V1_Sensitivity_Weather_SBrs.big",       # 0 stands out (weather only)
+    1: "Vertiport_V1_Weather_StandOut_k1_SBrs.big",   # 1 stand out of service
+    2: "Vertiport_V1_Weather_StandOut_k2_SBrs.big",   # 2 stands out of service
+    3: "Vertiport_V1_Weather_StandOut_k3_SBrs.big",   # 3 stands out -> capacity 0
+}
+# Weather severity axis: bad-weather onset rate (mean bad-spell = 1/repair).
+# 0.001 ~ "always clear" (BigraphER rejects an exact 0.0 rate).
+COMPOUNDSW_WEATHER_FF = [0.001, 0.02, 0.05, 0.1, 0.2]
+COMPOUNDSW_WEATHER_REPAIR = 0.05    # mean bad-weather spell 20 min
+
+def run_compound_standweather(n=6):
+    """fig6 — sustained capacity heat-map: weather severity × stands out (R=?[S])."""
+    print(f"[compound-SW] stand-outage cost under weather (N={n}, fig6) ...")
+    cap_rows = []
+    for k in (0, 1, 2, 3):
+        model = COMPOUNDSW_CAP_MODELS[k]
+        for wff in COMPOUNDSW_WEATHER_FF:
+            consts = (f"n_evtol={n},weather_fault_rate={wff},"
+                      f"weather_repair_rate={COMPOUNDSW_WEATHER_REPAIR}")
+            g = generate(model, consts, f"V1_swcap_k{k}_wff{wff}_N{n}")
+            if not g:
+                continue
+            tra, csl, rews, states = g
+            thr = 60 * first_result(tra, csl, rews, 'R=? [ S ]')
+            cap_rows.append([k, wff, round(thr, 3), n])
+            print(f"   k={k} weather_ff={wff}: states={states} throughput={thr:.2f}")
+    write_csv("fig6_compound_capacity.csv",
+              ["stands_out", "weather_fault_rate", "throughput_oph", "n_evtol"],
+              cap_rows)
+
+
 MODULES = {
     "capacity": run_capacity,
-    "mix": run_mix,
-    "v3_oneway": run_v3_oneway,
-    "open": run_open_v1_v2,
+    "open": run_open,
     "resilience": lambda: run_resilience_depth(n=6),
+    "recovery": lambda: run_pad_recovery(n=6),
+    "compound_recovery": lambda: run_compound_recovery(n=6),
+    "compound_sw": lambda: run_compound_standweather(n=6),
 }
 
 
 def main():
-    order = ["capacity", "mix", "v3_oneway", "open", "resilience"]
+    order = ["capacity", "open", "resilience", "recovery",
+             "compound_recovery", "compound_sw"]
     parser = argparse.ArgumentParser(
         description="BigraphER → PRISM pipeline for eVTOL vertiport analysis.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

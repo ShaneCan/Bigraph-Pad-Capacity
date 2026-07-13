@@ -114,7 +114,12 @@ big fato_landing    = FATO.PadIn;
 big fato_departing  = FATO.PadOut;
 big pad_free        = FATO.Free;
 big some_stand_free = Stands.(Stand.Empty | id);   # at least one free stand
-big stand_servicing = Stands.(Stand.Svc | id);     # at least one stand servicing
+big svc_at_least_1  = Stands.(Stand.Svc | id);     # at least one stand in Svc
+big svc_at_least_2  = Stands.(Stand.Svc | Stand.Svc | id);
+big svc_at_least_3  = Stands.(Stand.Svc | Stand.Svc | Stand.Svc | id);
+big rdy_at_least_1  = Stands.(Stand.Rdy | id);
+big rdy_at_least_2  = Stands.(Stand.Rdy | Stand.Rdy | id);
+big rdy_at_least_3  = Stands.(Stand.Rdy | Stand.Rdy | Stand.Rdy | id);
 fun big approach_waiting(a) = Approach.AppN(a);           # a >= 1
 
 # =====================================================================
@@ -152,7 +157,12 @@ begin sbrs
     fato_departing,
     pad_free,
     some_stand_free,
-    stand_servicing,
+    svc_at_least_1,
+    svc_at_least_2,
+    svc_at_least_3,
+    rdy_at_least_1,
+    rdy_at_least_2,
+    rdy_at_least_3,
     approach_waiting(a_pos)
   };
 end

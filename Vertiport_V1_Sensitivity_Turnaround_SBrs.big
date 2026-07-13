@@ -72,7 +72,7 @@ big takeoff_enabled      = FATO.PadOut;
 big pad_landing          = FATO.PadIn;
 big pad_departing        = FATO.PadOut;
 big some_stand_free      = Stands.(Stand.Empty | id);
-big stand_servicing      = Stands.(Stand.Svc | id);
+big svc_at_least_1       = Stands.(Stand.Svc | id);
 
 big s0 =
     Approach.AppN(n_evtol)
@@ -96,6 +96,6 @@ begin sbrs
     pad_landing,
     pad_departing,
     some_stand_free,
-    stand_servicing
+    svc_at_least_1
   };
 end

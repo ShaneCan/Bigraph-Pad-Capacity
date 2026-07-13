@@ -1,18 +1,21 @@
 # =====================================================================
-# eVTOL Vertiport - V1 saturated resilience: WEATHER disruption only
+# eVTOL Vertiport - V1 compound recovery: pad closed + 2 stands out
 # ---------------------------------------------------------------------
-# Isolated weather fault/repair on top of the baseline V1 layout.
-#   Weather.Good <-> Weather.Bad  (weather_fault_rate / weather_repair_rate)
-# Bad weather blocks new landings, line-ups and take-offs.
-# Mean recovery time = 1/weather_repair_rate  (default 0.05 -> 20 min)
+# Transient recovery from a compound outage: pad starts CLOSED and TWO
+# stands start OUT.  Only repair transitions (pad_repair, stand_repair)
+# and normal operations are enabled - no fault injection.  Used to
+# measure how co-occurring stand faults erode pad-closure recovery
+# (fig5), via R=?[I=t] throughput recovery.
 #
-# Command line:  -c n_evtol=6,weather_fault_rate=0.05,weather_repair_rate=0.05
+# Command line:  -c n_evtol=6,repair_rate=0.1,stand_repair_rate=0.03333
+#                pad mean repair 10 min; stand mean repair 30 min
 # =====================================================================
 
 ctrl FATO       = 0;
 atomic ctrl Free   = 0;
 atomic ctrl PadIn  = 0;
 atomic ctrl PadOut = 0;
+atomic ctrl Closed = 0;
 
 ctrl Approach   = 0;  atomic fun ctrl AppN(k) = 0;
 ctrl TaxiIn     = 0;  atomic fun ctrl TiN(k)  = 0;
@@ -20,12 +23,9 @@ ctrl TaxiOut    = 0;  atomic fun ctrl ToN(k)  = 0;
 ctrl Stands     = 0;
 ctrl Stand      = 0;
 atomic ctrl Empty = 0;
+atomic ctrl Out   = 0;
 atomic ctrl Svc   = 0;
 atomic ctrl Rdy   = 0;
-
-ctrl Weather = 0;
-atomic ctrl Good = 0;
-atomic ctrl Bad  = 0;
 
 int m_stand = 3;
 
@@ -40,9 +40,9 @@ float rate_takeoff  = 1.0;
 int rew_takeoff = 1;
 
 fun react land(a) =
-    Approach.AppN(a) | FATO.Free | Weather.Good
+    Approach.AppN(a) | FATO.Free
   -[rate_land]->
-    Approach.AppN(a - 1) | FATO.PadIn | Weather.Good;
+    Approach.AppN(a - 1) | FATO.PadIn;
 
 fun react clear_pad(t) =
     FATO.PadIn | TaxiIn.TiN(t)
@@ -65,36 +65,34 @@ fun react leave_stand(o) =
     Stands.(Stand.Empty | id) | TaxiOut.ToN(o + 1);
 
 fun react lineup(o) =
-    TaxiOut.ToN(o) | FATO.Free | Weather.Good
+    TaxiOut.ToN(o) | FATO.Free
   -[rate_lineup]->
-    TaxiOut.ToN(o - 1) | FATO.PadOut | Weather.Good;
+    TaxiOut.ToN(o - 1) | FATO.PadOut;
 
 fun react takeoff(a) =
-    FATO.PadOut | Approach.AppN(a) | Weather.Good
+    FATO.PadOut | Approach.AppN(a)
   -[rate_takeoff]->
-    FATO.Free | Approach.AppN(a + 1) | Weather.Good;
+    FATO.Free | Approach.AppN(a + 1);
 
-react weather_fault =
-    Weather.Good -[weather_fault_rate]-> Weather.Bad;
+react pad_repair =
+    FATO.Closed -[repair_rate]-> FATO.Free;
 
-react weather_repair =
-    Weather.Bad -[weather_repair_rate]-> Weather.Good;
+react stand_repair =
+    Stands.(Stand.Out | id) -[stand_repair_rate]-> Stands.(Stand.Empty | id);
 
-fun big takeoff_enabled(a) = FATO.PadOut | Approach.AppN(a) | Weather.Good;
-
-big weather_bad     = Weather.Bad;
+big takeoff_enabled = FATO.PadOut;
+big pad_closed      = FATO.Closed;
 big pad_landing     = FATO.PadIn;
 big pad_departing   = FATO.PadOut;
 big some_stand_free = Stands.(Stand.Empty | id);
-big nominal         = FATO.Free | Weather.Good;
+big stand_out       = Stands.(Stand.Out | id);
 
 big s0 =
     Approach.AppN(n_evtol)
-  | FATO.Free
+  | FATO.Closed
   | TaxiIn.TiN(0)
   | TaxiOut.ToN(0)
-  | Stands.(Stand.Empty | Stand.Empty | Stand.Empty)
-  | Weather.Good;
+  | Stands.(Stand.Out | Stand.Out | Stand.Empty);
 
 begin sbrs
   int a_pos   = [1:1:n_evtol];   int a_any0 = [0:1:n_evtol - 1];
@@ -105,14 +103,14 @@ begin sbrs
     { land(a_pos), takeoff(a_any0), clear_pad(t_any0),
       enter_stand(t_pos), turnaround,
       leave_stand(o_any0), lineup(o_pos),
-      weather_fault, weather_repair }
+      pad_repair, stand_repair }
   ];
   preds = {
-    takeoff_enabled(a_any0)[rew_takeoff],
-    weather_bad,
+    takeoff_enabled[rew_takeoff],
+    pad_closed,
     pad_landing,
     pad_departing,
     some_stand_free,
-    nominal
+    stand_out
   };
 end

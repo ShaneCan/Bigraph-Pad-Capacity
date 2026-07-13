@@ -86,7 +86,6 @@ big fato_landing         = FATO.PadIn;
 big fato_departing       = FATO.PadOut;
 big some_stand_free      = Stands.(Stand.Empty | id);
 big approach_full        = Approach.AppN(k_app);
-fun big app_count(a)     = Approach.AppN(a);
 fun big taxi_in_count(t) = TaxiIn.TiN(t);
 fun big taxi_out_count(o)= TaxiOut.ToN(o);
 big svc_at_least_1       = Stands.(Stand.Svc | id);
@@ -114,7 +113,6 @@ begin sbrs
   int ti_any0 = [0:1:k_taxi - 1];
   int to_pos  = [1:1:k_taxi];
   int to_any0 = [0:1:k_taxi - 1];
-  int app_all = [0:1:k_app];
   int taxi_all = [0:1:k_taxi];
   init s0;
   rules = [
@@ -128,7 +126,6 @@ begin sbrs
     fato_departing,
     some_stand_free,
     approach_full,
-    app_count(app_all),
     taxi_in_count(taxi_all),
     taxi_out_count(taxi_all),
     svc_at_least_1,

@@ -1,0 +1,243 @@
+# =====================================================================
+# eVTOL Vertiport - Structure V3  2 FATO + 4 Stands
+# ---------------------------------------------------------------------
+#
+#        FATO1                 FATO2         (pads = the two open ends)
+#          |                     |
+#         S1  (right edge)      S3  (left edge)
+#          |                     |
+#          +------ S2 (bottom) --+
+#                   |
+#               [ Stand x4 ]
+#
+# Each taxi edge S1/S2/S3 is a single-lane, DIRECTION-LOCKED conflict
+# zone (single occupancy => at most one aircraft, hence one direction, at
+# a time: opposing traffic cannot join while it is busy).  A 1-slot
+# PASSING siding sits at each internal junction:
+#   P1 at the S1|S2 junction,  P2 at the S2|S3 junction.
+# A siding lets an aircraft step aside so head-on / stand-full conflicts
+# resolve, making the bidirectional taxiway deadlock-free (verified by
+# state-space generation: no deadlock states).
+#
+# Aircraft markers use a unified In/Out vocabulary throughout:
+#   On taxiway S1/S3:  In  = inbound toward S2 from pad (arrival)
+#                      Out = outbound toward pad from S2 (departure)
+#   On taxiway S2:     In  = arrived, looking for a stand
+#                      Out = ready to depart, looking for any free pad
+#   On sidings P1/P2:  In  = arrival aircraft held aside
+#                      Out = departure aircraft held aside
+#
+# Saturated closed loop of `n` aircraft; OPH = 60 * R=?[S].
+# Command line: -c n=4
+# =====================================================================
+
+# ---------- pads ------------------------------------------------------
+ctrl FATO1 = 0;
+ctrl FATO2 = 0;
+atomic ctrl Free   = 0;
+atomic ctrl PadIn  = 0;      # aircraft just landed, still on pad
+atomic ctrl PadOut = 0;      # aircraft lined up for take-off
+
+# ---------- approach queue (shared, closed loop) ----------------------
+ctrl Approach = 0; atomic fun ctrl AppN(k) = 0;
+
+# ---------- surface-movement admission control ------------------------
+# InVp counts aircraft currently inside the vertiport (pads + taxi core +
+# stands).  Landing is allowed only while InVp < m_move, so at most
+# m_move aircraft are ever inside; the rest wait in the approach hold.
+# The verified deadlock-free envelope is InVp <= 8, so m_move = 8 makes
+# EVERY fleet size deadlock-free without changing the N <= 8 results.
+# >=8 induce deadlock states.
+ctrl Movement = 0; atomic fun ctrl InVp(k) = 0;
+int m_move = 8;
+
+# ---------- taxi edges + passing sidings (single occupancy) -----------
+ctrl S1 = 0; ctrl S2 = 0; ctrl S3 = 0;
+ctrl P1 = 0; ctrl P2 = 0;
+atomic ctrl In  = 0;         # inbound: toward S2 (S1/S3/siding) / seeking stand (S2)
+atomic ctrl Out = 0;         # outbound: toward pad (S1/S3/siding) / seeking pad (S2)
+
+# ---------- stands on the S2 -------------------------------------
+ctrl Stands = 0;
+ctrl Stand  = 0;
+atomic ctrl Empty = 0;
+atomic ctrl Svc   = 0;
+atomic ctrl Rdy   = 0;
+
+int m_stand = 4;
+
+# ---------- rates (per minute) ----------------------------------------
+float rate_land    = 1.0;
+float rate_clear   = 2.0;    # vacate pad onto taxiway S1/S3
+float rate_taxi    = 4.0;    # one taxi hop / siding step (15 s)
+float rate_enter   = 1.3333333333;   # park into a stand
+float rate_service = 0.1;
+float rate_leave   = 4.0;    # push back onto S2 (15 s)
+float rate_lineup  = 1.5;    # taxi onto the pad (40 s)
+float rate_takeoff = 1.0;
+
+int rew_takeoff = 1;
+
+# =====================================================================
+# Landing: an approaching aircraft occupies a free pad.
+# =====================================================================
+# Land only when the adjacent taxiway (S1 or S3) is clear, so the aircraft
+# can always vacate the pad; this keeps "PadIn" and an inbound "Out" on
+# the same taxiway segment mutually exclusive (no head-on swap at the pad).
+fun react land1(a, k) =
+    Approach.AppN(a) | FATO1.Free | S1.1 | Movement.InVp(k)
+  -[rate_land]->
+    Approach.AppN(a - 1) | FATO1.PadIn | S1.1 | Movement.InVp(k + 1);
+
+fun react land2(a, k) =
+    Approach.AppN(a) | FATO2.Free | S3.1 | Movement.InVp(k)
+  -[rate_land]->
+    Approach.AppN(a - 1) | FATO2.PadIn | S3.1 | Movement.InVp(k + 1);
+
+# =====================================================================
+# Vacate the pad onto the adjacent taxiway (S1 or S3) as an arrival (In).
+# =====================================================================
+react pad1_to_s1 = FATO1.PadIn | S1.1 -[rate_clear]-> FATO1.Free | S1.In;
+react pad2_to_s3 = FATO2.PadIn | S3.1 -[rate_clear]-> FATO2.Free | S3.In;
+
+# =====================================================================
+# Arrival taxis from S1/S3 onto taxiway S2 (direct move).
+# =====================================================================
+react s1_to_s2 = S1.In | S2.1 -[rate_taxi]-> S1.1 | S2.In;
+react s3_to_s2 = S3.In | S2.1 -[rate_taxi]-> S3.1 | S2.In;
+
+# =====================================================================
+# Park into a free stand from taxiway S2.
+# =====================================================================
+react park = S2.In | Stands.(Stand.Empty | id)
+  -[rate_enter]-> S2.1 | Stands.(Stand.Svc | id);
+
+# =====================================================================
+# Turnaround service, then push back onto S2 as an (uncommitted)
+# departure that may leave through either S1 or S3.
+# =====================================================================
+react turn = Stands.(Stand.Svc | id) -[rate_service]-> Stands.(Stand.Rdy | id);
+
+react leave = Stands.(Stand.Rdy | id) | S2.1
+  -[rate_leave]-> Stands.(Stand.Empty | id) | S2.Out;
+
+# A departure blocking S2 may pull back into a free stand to yield
+# (the stands double as passing bays on the bottom edge); this keeps the
+# single-cell taxiway S2 from gridlocking when arrivals surround it.
+react yield_dep = S2.Out | Stands.(Stand.Empty | id)
+  -[rate_taxi]-> S2.1 | Stands.(Stand.Rdy | id);
+
+# Stand handover (relief only): when NO stand is free and S2 is
+# blocked by an arrival, the arrival takes a ready stand as that stand's
+# occupant pushes back onto S2 to depart (one coordinated step).
+# The `if !(Stand.Empty) in param` guard restricts it to the full-stands
+# gridlock case (N >= 7), so ordinary arrivals still use `park`.
+react handover = S2.In | Stands.(Stand.Rdy | id)
+  -[rate_leave]-> S2.Out | Stands.(Stand.Svc | id)
+  if !(Stand.Empty) in param;
+
+# =====================================================================
+# Departure taxis from S2 onto whichever taxiway segment (S1 or S3) is
+# clear, but only toward a FREE pad (so an outbound aircraft never faces
+# a just-landed arrival on the same segment).
+# =====================================================================
+react s2_to_s1 = S2.Out | S1.1 | FATO1.Free -[rate_taxi]-> S2.1 | S1.Out | FATO1.Free;
+react s2_to_s3 = S2.Out | S3.1 | FATO2.Free -[rate_taxi]-> S2.1 | S3.Out | FATO2.Free;
+
+# =====================================================================
+# Line up on the pad, then take off (closed loop: re-enter Approach).
+# =====================================================================
+react s1_to_pad1 = S1.Out | FATO1.Free -[rate_lineup]-> S1.1 | FATO1.PadOut;
+react s3_to_pad2 = S3.Out | FATO2.Free -[rate_lineup]-> S3.1 | FATO2.PadOut;
+
+fun react takeoff1(a, k) =
+    FATO1.PadOut | Approach.AppN(a) | Movement.InVp(k)
+  -[rate_takeoff]->
+    FATO1.Free | Approach.AppN(a + 1) | Movement.InVp(k - 1);
+
+fun react takeoff2(a, k) =
+    FATO2.PadOut | Approach.AppN(a) | Movement.InVp(k)
+  -[rate_takeoff]->
+    FATO2.Free | Approach.AppN(a + 1) | Movement.InVp(k - 1);
+
+# =====================================================================
+# Passing siding P1 at the S1|S2 junction: an arrival on S1 or a
+# departure on S2 can step aside so opposing traffic (and stand-full
+# relief) clears.  P2 mirrors this at the S2|S3 junction.
+# =====================================================================
+react s1in_to_p1  = S1.In  | P1.1 -[rate_taxi]-> S1.1 | P1.In;
+react p1in_to_s2  = P1.In  | S2.1 -[rate_taxi]-> P1.1 | S2.In;
+react s2out_to_p1 = S2.Out | P1.1 -[rate_taxi]-> S2.1 | P1.Out;
+react p1out_to_s1 = P1.Out | S1.1 | FATO1.Free -[rate_taxi]-> P1.1 | S1.Out | FATO1.Free;
+react s2in_to_p1  = S2.In  | P1.1 -[rate_taxi]-> S2.1 | P1.In;   # stand-full relief
+
+react s3in_to_p2  = S3.In  | P2.1 -[rate_taxi]-> S3.1 | P2.In;
+react p2in_to_s2  = P2.In  | S2.1 -[rate_taxi]-> P2.1 | S2.In;
+react s2out_to_p2 = S2.Out | P2.1 -[rate_taxi]-> S2.1 | P2.Out;
+react p2out_to_s3 = P2.Out | S3.1 | FATO2.Free -[rate_taxi]-> P2.1 | S3.Out | FATO2.Free;
+react s2in_to_p2  = S2.In  | P2.1 -[rate_taxi]-> S2.1 | P2.In;   # stand-full relief
+
+# =====================================================================
+# Predicates: throughput reward, pad / stand utilisation, safety.
+# =====================================================================
+big takeoff1_enabled = FATO1.PadOut;
+big takeoff2_enabled = FATO2.PadOut;
+big pad1_landing     = FATO1.PadIn;
+big pad1_departing   = FATO1.PadOut;
+big pad2_landing     = FATO2.PadIn;
+big pad2_departing   = FATO2.PadOut;
+big pad1_free        = FATO1.Free;
+big pad2_free        = FATO2.Free;
+big some_stand_free  = Stands.(Stand.Empty | id);
+big svc_at_least_1   = Stands.(Stand.Svc | id);
+big svc_at_least_2   = Stands.(Stand.Svc | Stand.Svc | id);
+big svc_at_least_3   = Stands.(Stand.Svc | Stand.Svc | Stand.Svc | id);
+big svc_at_least_4   = Stands.(Stand.Svc | Stand.Svc | Stand.Svc | Stand.Svc | id);
+big rdy_at_least_1   = Stands.(Stand.Rdy | id);
+big rdy_at_least_2   = Stands.(Stand.Rdy | Stand.Rdy | id);
+big rdy_at_least_3   = Stands.(Stand.Rdy | Stand.Rdy | Stand.Rdy | id);
+big rdy_at_least_4   = Stands.(Stand.Rdy | Stand.Rdy | Stand.Rdy | Stand.Rdy | id);
+
+big s0 =
+    Approach.AppN(n)
+  | Movement.InVp(0)
+  | FATO1.Free | FATO2.Free
+  | S1.1 | S2.1 | S3.1
+  | P1.1 | P2.1
+  | Stands.(Stand.Empty | Stand.Empty | Stand.Empty | Stand.Empty);
+
+begin sbrs
+  int app_pos  = [1:1:n];   int app_any0 = [0:1:n - 1];
+  int mv_any0  = [0:1:m_move - 1];   int mv_pos = [1:1:m_move];
+  init s0;
+  rules = [
+    { land1(app_pos, mv_any0), land2(app_pos, mv_any0),
+      pad1_to_s1, pad2_to_s3,
+      s1_to_s2, s3_to_s2,
+      park, turn, leave, yield_dep, handover,
+      s2_to_s1, s2_to_s3,
+      s1_to_pad1, s3_to_pad2,
+      takeoff1(app_any0, mv_pos), takeoff2(app_any0, mv_pos),
+      s1in_to_p1, p1in_to_s2, s2out_to_p1, p1out_to_s1, s2in_to_p1,
+      s3in_to_p2, p2in_to_s2, s2out_to_p2, p2out_to_s3, s2in_to_p2 }
+  ];
+  preds = {
+    takeoff1_enabled[rew_takeoff],
+    takeoff2_enabled[rew_takeoff],
+    pad1_landing,
+    pad1_departing,
+    pad2_landing,
+    pad2_departing,
+    pad1_free,
+    pad2_free,
+    some_stand_free,
+    svc_at_least_1,
+    svc_at_least_2,
+    svc_at_least_3,
+    svc_at_least_4,
+    rdy_at_least_1,
+    rdy_at_least_2,
+    rdy_at_least_3,
+    rdy_at_least_4
+  };
+end

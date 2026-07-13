@@ -1,0 +1,113 @@
+ctrl Pad = 0;
+ctrl Drone = 0;
+fun ctrl Taxi(n) = 0;
+fun ctrl Stands(k) = 0; 
+atomic ctrl Unserviced = 0;
+atomic ctrl Serviced = 0;
+atomic ctrl Free = 0;
+ctrl Occ = 0;
+
+atomic fun ctrl Approach(k) = 0;
+
+int max_drones = 4;  
+int max_taxi=5;
+int max_stands=3;  #(at most max_taxi-2; 0 and n are booked for the pad)
+
+float weight_land = 1.0;
+float weight_takeoff = 1.0;
+float weight_clear_to_taxi = 6.0;
+float weight_traffic_taxi = 1.5;
+float weight_clear_to_pad = 6.0;
+float weight_pad_tarmac_traffic = 1.5;
+float weight_clear_to_takeoff = 4.0;
+float weight_getstand = 1.0;
+float weight_service = 0.15;
+float weight_leave_stand = 3.0;
+float weight_leave_stand_traffic = 1.5;
+
+fun react land(d) =
+    Pad.Free | Approach(d)
+  -[weight_land]->
+    Pad.Occ.Drone.1 | Approach(d - 1);
+
+fun react takeoff(d) =
+    Pad.Occ.Drone.Serviced | Approach(d)
+  -[weight_takeoff]->
+    Pad.Free | Approach(d + 1);
+
+react req_taxi1 =
+    Pad.Occ.Drone.1 | Taxi(0).Free
+  -[weight_clear_to_taxi]->
+    Pad.Free | Taxi(0).Occ.Drone.1;
+
+react req_taxi1_traffic =
+    Pad.Occ.Drone.1 | Taxi(0).Occ
+  -[weight_pad_tarmac_traffic]->
+    Pad.Occ.Drone.1 | Taxi(0).Occ;
+
+react req_taxin =
+    Pad.Free | Taxi(max_taxi-1).Occ.Drone.Serviced
+  -[weight_clear_to_pad]->
+    Pad.Occ.Drone.Serviced | Taxi(max_taxi-1).Free;
+
+react req_taxin_traffic =
+    Pad.Occ | Taxi(max_taxi-1).Occ.Drone.Serviced
+  -[weight_pad_tarmac_traffic]->
+    Pad.Occ | Taxi(max_taxi-1).Occ.Drone.Serviced;
+
+fun react taxing(t) =
+    Taxi(t-1).Occ.id | Taxi(t).Free
+  -[weight_clear_to_taxi]->
+    Taxi(t-1).Free | Taxi(t).Occ.id;
+
+fun react taxing_wait(t) =
+    Taxi(t-1).Occ.id | Taxi(t).Occ.id
+  -[weight_traffic_taxi]->
+    Taxi(t-1).Occ.id | Taxi(t).Occ.id;
+
+fun react take_stand(t) =
+    Taxi(t).Occ.Drone.1 | Stands(t).Free
+  -[weight_getstand]->
+    Taxi(t).Free | Stands(t).Occ.Drone.1;
+
+fun react serve_stand(s) =
+    Stands(s).(Occ.Drone.1)
+  -[weight_service]->
+    Stands(s).(Occ.Drone.Serviced);
+
+fun react leave_stand(t) =
+    Stands(t).(Occ.Drone.Serviced) |  Taxi(t).Free
+  -[weight_leave_stand]->
+    Stands(t).Free | Taxi(t).Occ.Drone.Serviced;
+
+fun react leave_stand_traffic(t) =
+    Stands(t).(Occ.Drone.Serviced) |  Taxi(t).Occ.id
+  -[weight_leave_stand_traffic]->
+    Stands(t).(Occ.Drone.Serviced) | Taxi(t).Occ.id;
+
+big s0 =
+    Approach(max_drones-1)
+  | Pad.Free 
+  | Taxi(0).Free | Taxi(1).Free | Taxi(2).Free | Taxi(3).Free | Taxi(4).Free
+  | Stands(1).Free | Stands(2).Free | Stands(3).Free
+;
+begin sbrs
+    int nd = [1:1:max_drones+1];
+    int nt = [1:1:max_taxi-1];
+    int ns = [1:1:max_stands];
+  init s0;
+  rules = [
+    {
+      take_stand(ns), leave_stand(ns), leave_stand_traffic(ns),
+      req_taxi1,req_taxin,
+      req_taxi1_traffic,req_taxin_traffic,
+      taxing_wait(nt),
+      land(nd), takeoff(nd),
+      taxing(nt),
+      serve_stand(ns)
+    }
+  ];
+  #preds = {
+
+  #};
+end
