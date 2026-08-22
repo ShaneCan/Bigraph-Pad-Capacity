@@ -86,6 +86,7 @@ big pad_landing     = FATO.PadIn;
 big pad_departing   = FATO.PadOut;
 big some_stand_free = Stands.(Stand.Empty | id);
 big stand_out       = Stands.(Stand.Out | id);
+fun big app_at(a)   = Approach.AppN(a);   # queue holds exactly a aircraft
 
 big s0 =
     Approach.AppN(n_evtol)
@@ -98,6 +99,7 @@ begin sbrs
   int a_pos   = [1:1:n_evtol];   int a_any0 = [0:1:n_evtol - 1];
   int t_pos   = [1:1:n_evtol];   int t_any0 = [0:1:n_evtol - 1];
   int o_pos   = [1:1:n_evtol];   int o_any0 = [0:1:n_evtol - 1];
+  int a_all   = [0:1:n_evtol];
   init s0;
   rules = [
     { land(a_pos), takeoff(a_any0), clear_pad(t_any0),
@@ -111,6 +113,7 @@ begin sbrs
     pad_landing,
     pad_departing,
     some_stand_free,
-    stand_out
+    stand_out,
+    app_at(a_all)
   };
 end

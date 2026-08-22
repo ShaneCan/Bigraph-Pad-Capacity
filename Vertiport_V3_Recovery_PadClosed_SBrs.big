@@ -1,0 +1,200 @@
+# =====================================================================
+# eVTOL Vertiport - V3 pad recovery from closure (transient analysis)
+# ---------------------------------------------------------------------
+# Dual-FATO bidirectional U-taxiway layout (see V3_2FATO_4Stand_BiDir).
+# FATO1 starts CLOSED; FATO2 keeps operating, so the vertiport degrades
+# to single-pad operation and RECOVERS to full dual-pad throughput when
+# pad1_repair fires.  This is the resilience counterpart to the V1
+# single-pad closure (Recovery_PadClosed): with a second FATO still
+# running, the transient throughput floor is higher and recovery to
+# nominal is faster.  Used for R=?[I=t] transient recovery (fig4, V3).
+# Mean repair time = 1/repair_rate  (default repair_rate=0.1 -> 10 min)
+#
+# Command line:  -c n=6,repair_rate=0.1
+# =====================================================================
+
+# ---------- pads ------------------------------------------------------
+ctrl FATO1 = 0;
+ctrl FATO2 = 0;
+atomic ctrl Free   = 0;
+atomic ctrl PadIn  = 0;      # aircraft just landed, still on pad
+atomic ctrl PadOut = 0;      # aircraft lined up for take-off
+atomic ctrl Closed = 0;      # pad out of service (closure), awaits repair
+
+# ---------- approach queue (shared, closed loop) ----------------------
+ctrl Approach = 0; atomic fun ctrl AppN(k) = 0;
+
+# ---------- surface-movement admission control ------------------------
+ctrl Movement = 0; atomic fun ctrl InVp(k) = 0;
+int m_move = 8;
+
+# ---------- taxi edges + passing sidings (single occupancy) -----------
+ctrl S1 = 0; ctrl S2 = 0; ctrl S3 = 0;
+ctrl P1 = 0; ctrl P2 = 0;
+atomic ctrl In  = 0;
+atomic ctrl Out = 0;
+
+# ---------- stands on the S2 -------------------------------------
+ctrl Stands = 0;
+ctrl Stand  = 0;
+atomic ctrl Empty = 0;
+atomic ctrl Svc   = 0;
+atomic ctrl Rdy   = 0;
+
+int m_stand = 4;
+
+# ---------- rates (per minute) ----------------------------------------
+float rate_land    = 1.0;
+float rate_clear   = 2.0;
+float rate_taxi    = 4.0;
+float rate_enter   = 1.3333333333;
+float rate_service = 0.1;
+float rate_leave   = 4.0;
+float rate_lineup  = 1.5;
+float rate_takeoff = 1.0;
+
+int rew_takeoff = 1;
+
+# =====================================================================
+# Landing (only onto a FREE pad; a CLOSED pad never accepts arrivals).
+# =====================================================================
+fun react land1(a, k) =
+    Approach.AppN(a) | FATO1.Free | S1.1 | Movement.InVp(k)
+  -[rate_land]->
+    Approach.AppN(a - 1) | FATO1.PadIn | S1.1 | Movement.InVp(k + 1);
+
+fun react land2(a, k) =
+    Approach.AppN(a) | FATO2.Free | S3.1 | Movement.InVp(k)
+  -[rate_land]->
+    Approach.AppN(a - 1) | FATO2.PadIn | S3.1 | Movement.InVp(k + 1);
+
+# =====================================================================
+# Vacate the pad onto the adjacent taxiway (S1 or S3) as an arrival (In).
+# =====================================================================
+react pad1_to_s1 = FATO1.PadIn | S1.1 -[rate_clear]-> FATO1.Free | S1.In;
+react pad2_to_s3 = FATO2.PadIn | S3.1 -[rate_clear]-> FATO2.Free | S3.In;
+
+# =====================================================================
+# Arrival taxis from S1/S3 onto taxiway S2 (direct move).
+# =====================================================================
+react s1_to_s2 = S1.In | S2.1 -[rate_taxi]-> S1.1 | S2.In;
+react s3_to_s2 = S3.In | S2.1 -[rate_taxi]-> S3.1 | S2.In;
+
+# =====================================================================
+# Park into a free stand from taxiway S2.
+# =====================================================================
+react park = S2.In | Stands.(Stand.Empty | id)
+  -[rate_enter]-> S2.1 | Stands.(Stand.Svc | id);
+
+# =====================================================================
+# Turnaround service, then push back onto S2 as a departure.
+# =====================================================================
+react turn = Stands.(Stand.Svc | id) -[rate_service]-> Stands.(Stand.Rdy | id);
+
+react leave = Stands.(Stand.Rdy | id) | S2.1
+  -[rate_leave]-> Stands.(Stand.Empty | id) | S2.Out;
+
+react yield_dep = S2.Out | Stands.(Stand.Empty | id)
+  -[rate_taxi]-> S2.1 | Stands.(Stand.Rdy | id);
+
+react handover = S2.In | Stands.(Stand.Rdy | id)
+  -[rate_leave]-> S2.Out | Stands.(Stand.Svc | id)
+  if !(Stand.Empty) in param;
+
+# =====================================================================
+# Departure taxis from S2 onto whichever taxiway segment is clear,
+# but only toward a FREE pad.
+# =====================================================================
+react s2_to_s1 = S2.Out | S1.1 | FATO1.Free -[rate_taxi]-> S2.1 | S1.Out | FATO1.Free;
+react s2_to_s3 = S2.Out | S3.1 | FATO2.Free -[rate_taxi]-> S2.1 | S3.Out | FATO2.Free;
+
+# =====================================================================
+# Line up on the pad, then take off (closed loop: re-enter Approach).
+# =====================================================================
+react s1_to_pad1 = S1.Out | FATO1.Free -[rate_lineup]-> S1.1 | FATO1.PadOut;
+react s3_to_pad2 = S3.Out | FATO2.Free -[rate_lineup]-> S3.1 | FATO2.PadOut;
+
+fun react takeoff1(a, k) =
+    FATO1.PadOut | Approach.AppN(a) | Movement.InVp(k)
+  -[rate_takeoff]->
+    FATO1.Free | Approach.AppN(a + 1) | Movement.InVp(k - 1);
+
+fun react takeoff2(a, k) =
+    FATO2.PadOut | Approach.AppN(a) | Movement.InVp(k)
+  -[rate_takeoff]->
+    FATO2.Free | Approach.AppN(a + 1) | Movement.InVp(k - 1);
+
+# =====================================================================
+# Passing sidings P1 (S1|S2 junction) and P2 (S2|S3 junction).
+# =====================================================================
+react s1in_to_p1  = S1.In  | P1.1 -[rate_taxi]-> S1.1 | P1.In;
+react p1in_to_s2  = P1.In  | S2.1 -[rate_taxi]-> P1.1 | S2.In;
+react s2out_to_p1 = S2.Out | P1.1 -[rate_taxi]-> S2.1 | P1.Out;
+react p1out_to_s1 = P1.Out | S1.1 | FATO1.Free -[rate_taxi]-> P1.1 | S1.Out | FATO1.Free;
+react s2in_to_p1  = S2.In  | P1.1 -[rate_taxi]-> S2.1 | P1.In;
+
+react s3in_to_p2  = S3.In  | P2.1 -[rate_taxi]-> S3.1 | P2.In;
+react p2in_to_s2  = P2.In  | S2.1 -[rate_taxi]-> P2.1 | S2.In;
+react s2out_to_p2 = S2.Out | P2.1 -[rate_taxi]-> S2.1 | P2.Out;
+react p2out_to_s3 = P2.Out | S3.1 | FATO2.Free -[rate_taxi]-> P2.1 | S3.Out | FATO2.Free;
+react s2in_to_p2  = S2.In  | P2.1 -[rate_taxi]-> S2.1 | P2.In;
+
+# =====================================================================
+# Pad reopening (closure -> free).  repair_rate supplied via -c.
+# =====================================================================
+react pad1_repair = FATO1.Closed -[repair_rate]-> FATO1.Free;
+
+# =====================================================================
+# Predicates: throughput reward, pad / stand utilisation, safety.
+# =====================================================================
+big takeoff1_enabled = FATO1.PadOut;
+big takeoff2_enabled = FATO2.PadOut;
+big pad1_closed      = FATO1.Closed;
+big pad1_landing     = FATO1.PadIn;
+big pad1_departing   = FATO1.PadOut;
+big pad2_landing     = FATO2.PadIn;
+big pad2_departing   = FATO2.PadOut;
+big pad1_free        = FATO1.Free;
+big pad2_free        = FATO2.Free;
+big some_stand_free  = Stands.(Stand.Empty | id);
+fun big app_at(a)    = Approach.AppN(a);   # queue holds exactly a aircraft
+
+big s0 =
+    Approach.AppN(n)
+  | Movement.InVp(0)
+  | FATO1.Closed | FATO2.Free
+  | S1.1 | S2.1 | S3.1
+  | P1.1 | P2.1
+  | Stands.(Stand.Empty | Stand.Empty | Stand.Empty | Stand.Empty);
+
+begin sbrs
+  int app_pos  = [1:1:n];   int app_any0 = [0:1:n - 1];
+  int mv_any0  = [0:1:m_move - 1];   int mv_pos = [1:1:m_move];
+  int a_all    = [0:1:n];
+  init s0;
+  rules = [
+    { land1(app_pos, mv_any0), land2(app_pos, mv_any0),
+      pad1_to_s1, pad2_to_s3,
+      s1_to_s2, s3_to_s2,
+      park, turn, leave, yield_dep, handover,
+      s2_to_s1, s2_to_s3,
+      s1_to_pad1, s3_to_pad2,
+      takeoff1(app_any0, mv_pos), takeoff2(app_any0, mv_pos),
+      s1in_to_p1, p1in_to_s2, s2out_to_p1, p1out_to_s1, s2in_to_p1,
+      s3in_to_p2, p2in_to_s2, s2out_to_p2, p2out_to_s3, s2in_to_p2,
+      pad1_repair }
+  ];
+  preds = {
+    takeoff1_enabled[rew_takeoff],
+    takeoff2_enabled[rew_takeoff],
+    pad1_closed,
+    pad1_landing,
+    pad1_departing,
+    pad2_landing,
+    pad2_departing,
+    pad1_free,
+    pad2_free,
+    some_stand_free,
+    app_at(a_all)
+  };
+end

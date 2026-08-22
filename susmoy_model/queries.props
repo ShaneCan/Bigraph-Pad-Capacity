@@ -15,6 +15,14 @@
 //     -importstaterewards _prism_tmp/4stand_nN.rews \
 //     -ctmc _prism_tmp/4stand_nN.combined.csl \
 //     -gs -maxiters 500000
+//
+// Result interpretation:
+//   R=? [S]       → steady-state reward rate; multiply by 60 → OPH (flights/hour)
+//   S=? ["X"]     → steady-state probability of being in states satisfying label X
+//   Stand util    → stand_svc_s + stand_rdy_s  (unserviced + ready-to-depart)
+//   Taxi occupancy time per segment  →  p_busy / arrival_rate  (Little's law;
+//                                     arrival_rate = OPH / 60 flights/min)
+//                                     plot: mean over all segments
 
 // --- Throughput ---
 R=? [ S ]

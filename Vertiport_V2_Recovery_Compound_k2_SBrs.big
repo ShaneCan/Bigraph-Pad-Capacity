@@ -1,11 +1,12 @@
 # =====================================================================
-# eVTOL Vertiport - V1 compound recovery: pad closed + 1 stand out
+# eVTOL Vertiport - V2 compound recovery: pad closed + 2 stands out
 # ---------------------------------------------------------------------
-# Transient recovery from a compound outage: pad starts CLOSED and ONE
-# stand starts OUT.  Only repair transitions (pad_repair, stand_repair)
-# and normal operations are enabled - no fault injection.  Used to
-# measure how a co-occurring stand fault erodes pad-closure recovery
-# (fig5), via R=?[I=t] throughput recovery.
+# V2 layout (1 FATO + 4 stands).  Transient recovery from a compound
+# outage: pad starts CLOSED and TWO stands start OUT.  Only repair
+# transitions (pad_repair, stand_repair) and normal operations are
+# enabled - no fault injection.  Compared against V1 (3 stands) at the
+# same compound scenario, the extra stand keeps the recovering
+# throughput floor higher (fig5, V2 overlay), via R=?[I=t].
 #
 # Command line:  -c n_evtol=6,repair_rate=0.1,stand_repair_rate=0.03333
 #                pad mean repair 10 min; stand mean repair 30 min
@@ -27,7 +28,7 @@ atomic ctrl Out   = 0;
 atomic ctrl Svc   = 0;
 atomic ctrl Rdy   = 0;
 
-int m_stand = 3;
+int m_stand = 4;
 
 float rate_land     = 1.0;
 float rate_clear    = 2.0;
@@ -93,7 +94,7 @@ big s0 =
   | FATO.Closed
   | TaxiIn.TiN(0)
   | TaxiOut.ToN(0)
-  | Stands.(Stand.Out | Stand.Empty | Stand.Empty);
+  | Stands.(Stand.Out | Stand.Out | Stand.Empty | Stand.Empty);
 
 begin sbrs
   int a_pos   = [1:1:n_evtol];   int a_any0 = [0:1:n_evtol - 1];

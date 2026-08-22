@@ -1,0 +1,172 @@
+# =====================================================================
+# eVTOL Vertiport - V2 repairable availability: 1 FATO + 4 Stands
+# ---------------------------------------------------------------------
+# Long-run service-level (SLA) resilience under RECURRENT disruption.
+# Unlike the Recovery_* models (start faulted, repair-only, absorbing),
+# this model starts HEALTHY and both injects AND repairs faults, so the
+# operational state is recurrent.  Two fault channels:
+#
+#   pad     : Free -[pad_fail]-> Closed -[pad_repair]-> Free
+#   stand   : a stand goes Out (fault) and is later repaired to Empty.
+#             A fault on a stand IN SERVICE (Svc) ejects the aircraft
+#             back onto the TaxiIn queue; it re-parks via the normal
+#             enter_stand rule when a stand is free, else it waits
+#             (physical relocation, no teleport).  A Rdy stand is not
+#             faulted: turnaround is done and it pushes back normally.
+#
+# The SLA predicate op(d) = "current configuration can sustain >= d fph"
+# is built in PRISM from pad_closed + out_at_least_k labels (the demand
+# d maps to a stand-outage threshold via the fig6 capacity ladder).
+#
+# Command line (rates undeclared -> set via -c).  Fault onset rates follow
+# the sensitivity convention: a channel held at steady-state unavailability P
+# with recovery rate mu takes onset rate lambda = P*mu/(1-P).  Pad at P=1%
+# (repair 10 min, mu=0.1) and each stand at P=3% (repair 20 min, mu=0.05):
+#   -c n_evtol=6,pad_fail_rate=0.001010,pad_repair_rate=0.1,
+#      stand_fail_rate=0.001546,stand_repair_rate=0.05
+# =====================================================================
+
+# ---------- the single touch-down / lift-off pad ----------
+ctrl FATO       = 0;
+atomic ctrl Free   = 0;
+atomic ctrl PadIn  = 0;
+atomic ctrl PadOut = 0;
+atomic ctrl Closed = 0;        # pad closed by a fault
+
+# ---------- counted locations ----------
+ctrl Approach   = 0;  atomic fun ctrl AppN(k) = 0;
+ctrl TaxiIn     = 0;  atomic fun ctrl TiN(k)  = 0;
+ctrl TaxiOut    = 0;  atomic fun ctrl ToN(k)  = 0;
+ctrl Stands     = 0;
+ctrl Stand      = 0;
+atomic ctrl Empty = 0;
+atomic ctrl Svc   = 0;
+atomic ctrl Rdy   = 0;
+atomic ctrl Out   = 0;         # this stand is out of service (fault)
+
+int m_stand = 4;
+
+# ---------- operational rates (per minute, fixed) ----------
+float rate_land     = 1.0;
+float rate_clear    = 2.0;
+float rate_enter    = 1.3333333333;
+float rate_service  = 0.1;
+float rate_leave    = 4.0;
+float rate_lineup   = 1.5;
+float rate_takeoff  = 1.0;
+
+int rew_takeoff = 1;           # = rate_takeoff
+
+# =====================================================================
+# Operational reaction rules (identical to the capacity model).
+# =====================================================================
+fun react land(a) =
+    Approach.AppN(a) | FATO.Free
+  -[rate_land]->
+    Approach.AppN(a - 1) | FATO.PadIn;
+
+fun react clear_pad(t) =
+    FATO.PadIn | TaxiIn.TiN(t)
+  -[rate_clear]->
+    FATO.Free | TaxiIn.TiN(t + 1);
+
+fun react enter_stand(t) =
+    TaxiIn.TiN(t) | Stands.(Stand.Empty | id)
+  -[rate_enter]->
+    TaxiIn.TiN(t - 1) | Stands.(Stand.Svc | id);
+
+react turnaround =
+    Stands.(Stand.Svc | id)
+  -[rate_service]->
+    Stands.(Stand.Rdy | id);
+
+fun react leave_stand(o) =
+    Stands.(Stand.Rdy | id) | TaxiOut.ToN(o)
+  -[rate_leave]->
+    Stands.(Stand.Empty | id) | TaxiOut.ToN(o + 1);
+
+fun react lineup(o) =
+    TaxiOut.ToN(o) | FATO.Free
+  -[rate_lineup]->
+    TaxiOut.ToN(o - 1) | FATO.PadOut;
+
+fun react takeoff(a) =
+    FATO.PadOut | Approach.AppN(a)
+  -[rate_takeoff]->
+    FATO.Free | Approach.AppN(a + 1);
+
+# =====================================================================
+# Fault-injection and repair rules.
+# =====================================================================
+# Pad closes only while free; reopens on repair.
+react pad_fail =
+    FATO.Free -[pad_fail_rate]-> FATO.Closed;
+
+react pad_repair =
+    FATO.Closed -[pad_repair_rate]-> FATO.Free;
+
+# A free stand faults with no aircraft displaced.
+react stand_fail_e =
+    Stands.(Stand.Empty | id) -[stand_fail_rate]-> Stands.(Stand.Out | id);
+
+# A stand in service faults: the aircraft returns to the TaxiIn queue and
+# re-parks via enter_stand (or waits there if no stand is free).  A Rdy
+# stand is not faulted here: its turnaround is complete and it pushes back
+# normally via leave_stand.
+fun react stand_fail_svc(t) =
+    TaxiIn.TiN(t) | Stands.(Stand.Svc | id)
+  -[stand_fail_rate]->
+    TaxiIn.TiN(t + 1) | Stands.(Stand.Out | id);
+
+# A faulted stand is repaired back to free.
+react stand_repair_e =
+    Stands.(Stand.Out | id) -[stand_repair_rate]-> Stands.(Stand.Empty | id);
+
+# =====================================================================
+# Predicates: throughput reward + SLA labels (pad_closed, out_at_least_k).
+# =====================================================================
+big takeoff_enabled = FATO.PadOut;
+
+big pad_closed      = FATO.Closed;
+big pad_free        = FATO.Free;
+big some_stand_free = Stands.(Stand.Empty | id);
+
+big out_at_least_1  = Stands.(Stand.Out | id);
+big out_at_least_2  = Stands.(Stand.Out | Stand.Out | id);
+big out_at_least_3  = Stands.(Stand.Out | Stand.Out | Stand.Out | id);
+big out_at_least_4  = Stands.(Stand.Out | Stand.Out | Stand.Out | Stand.Out | id);
+
+# =====================================================================
+# Initial state: healthy vertiport, all aircraft holding in-bound.
+# =====================================================================
+big s0 =
+    Approach.AppN(n_evtol)
+  | FATO.Free
+  | TaxiIn.TiN(0)
+  | TaxiOut.ToN(0)
+  | Stands.(Stand.Empty | Stand.Empty | Stand.Empty | Stand.Empty);
+
+begin sbrs
+  int a_pos   = [1:1:n_evtol];   int a_any0 = [0:1:n_evtol - 1];
+  int t_pos   = [1:1:n_evtol];   int t_any0 = [0:1:n_evtol - 1];
+  int o_pos   = [1:1:n_evtol];   int o_any0 = [0:1:n_evtol - 1];
+  init s0;
+  rules = [
+    { land(a_pos), takeoff(a_any0), clear_pad(t_any0),
+      enter_stand(t_pos), turnaround,
+      leave_stand(o_any0), lineup(o_pos),
+      pad_fail, pad_repair,
+      stand_fail_e, stand_fail_svc(t_any0),
+      stand_repair_e }
+  ];
+  preds = {
+    takeoff_enabled[rew_takeoff],
+    pad_closed,
+    pad_free,
+    some_stand_free,
+    out_at_least_1,
+    out_at_least_2,
+    out_at_least_3,
+    out_at_least_4
+  };
+end

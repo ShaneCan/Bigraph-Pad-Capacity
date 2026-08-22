@@ -4,95 +4,133 @@
 // BigraphER exports, for every model/parameter combination:
 //     <model>.tra    transition matrix (CTMC, rate-labelled)
 //     <model>.csl    label definitions (atomic propositions over state x)
-//     <model>.rews   state rewards (throughput = 60 × R=?[S])
+//     <model>.rews   state rewards (throughput = 60 x R=?[S])
 //
 // PRISM is invoked as
 //     prism -importtrans <model>.tra \
 //           -importstaterewards <model>.rews -ctmc \
 //           <props> -gs -maxiters 1000000
-// where <props> = the generated <model>.csl  followed by the queries
+// where <props> = the generated <model>.csl followed by the queries
 // below (the label definitions must precede the queries).  Gauss-Seidel
 // (-gs) is required for the steady-state solves to converge.
 //
 // scripts/run_analysis.py assembles these automatically from the .csl
 // labels; this file documents the meaning of each query for manual runs.
+// Label names below match the preds blocks of the current .big models.
 // =====================================================================
 
-// ---- Capacity / throughput (flights per hour = 60 × R=?[S]) -------
-// State reward on pad-departing (takeoff-enabled) states only.
+// ---- Capacity / throughput (flights per hour = 60 x R=?[S]) --------
+// State reward on take-off-enabled states only.
 R=? [ S ]
 
-// ---- Pad utilisation (single-pad layouts V1 / V2) -------------------
+// ---- Pad utilisation (single-pad layouts V1 / V2) ------------------
 S=? [ "fato_landing" ]      // P(pad busy with a landing)
 S=? [ "fato_departing" ]    // P(pad busy with a departure)
 // Pad utilisation (script) = S=?["fato_landing"] + S=?["fato_departing"]
 
-// ---- Pad utilisation (dual-pad layout V3) ---------------------------
-S=? [ "small_pad_landing" ]
-S=? [ "small_pad_departing" ]
-S=? [ "large_pad_landing" ]
-S=? [ "large_pad_departing" ]
-S=? [ "large_pad_landing_small" ]     // small aircraft using LargeFATO
-S=? [ "large_pad_departing_small" ]   // small aircraft using LargeFATO
-// Pad utilisation (script) = (small_pad + large_pad util) / 2
+// ---- Pad utilisation (dual-pad layout V3) --------------------------
+S=? [ "pad1_free" ]
+S=? [ "pad2_free" ]
+// Pad utilisation (script) = (2 - S=?["pad1_free"] - S=?["pad2_free"]) / 2
 
-// ---- Stand congestion -----------------------------------------------
+// ---- Stand congestion ----------------------------------------------
 // some_stand_free = at least one stand is Empty (see .big preds).
-S=? [ !"some_stand_free" ]   // P(every stand occupied — Svc or Rdy)
+S=? [ !"some_stand_free" ]   // P(every stand occupied, Svc or Rdy)
 
-// ---- Stand utilisation (V1 / V2: M = 3 or 4 stands) ----------------
+// ---- Stand utilisation (V1: M=3, V2 and V3: M=4) -------------------
 // Occupied = Stand.Svc (turnaround) or Stand.Rdy (ready to depart).
-// Each stand is an independent node, so counts use cumulative labels:
-//   svc_at_least_k  ↔  at least k stands in Svc
-//   rdy_at_least_k  ↔  at least k stands in Rdy
-// Query k = 1 .. M for each prefix (M = 3 for V1, M = 4 for V2).
-//
-// Example for V1 (M=3):
+// All layouts share the cumulative labels:
+//   svc_at_least_k  <->  at least k stands in Svc
+//   rdy_at_least_k  <->  at least k stands in Rdy
+// Query k = 1 .. M.  Example for V1 (M=3):
 S=? [ "svc_at_least_1" ]
 S=? [ "svc_at_least_2" ]
 S=? [ "svc_at_least_3" ]
 S=? [ "rdy_at_least_1" ]
 S=? [ "rdy_at_least_2" ]
 S=? [ "rdy_at_least_3" ]
-//
-// Post-process (same as run_analysis.mean_stand_utilisation):
-//   E[Svc] = P(≥1) + P(≥2) + … + P(≥M)
-//   E[Rdy] = P(≥1) + P(≥2) + … + P(≥M)
+// Post-process (run_analysis.mean_stand_utilisation):
+//   E[Svc] = P(>=1) + P(>=2) + ... + P(>=M)
+//   E[Rdy] = P(>=1) + P(>=2) + ... + P(>=M)
 //   stand_utilisation = (E[Svc] + E[Rdy]) / M
 
-// ---- Stand utilisation (V3: M = 4 stands, four stand-state types) ---
-// Query k = 1 .. 4 for each prefix:
-//   svcS_at_least_k, svcL_at_least_k, rdyS_at_least_k, rdyL_at_least_k
-//
-// Post-process:
-//   occupied = E[svcS] + E[svcL] + E[rdyS] + E[rdyL]
-//   stand_utilisation = occupied / 4
+// ---- Open M/M/c/K arrivals (V1_Open / V2_Open / V3_Open) -----------
+S=? [ "approach_full" ]   // PASTA blocking / loss probability
+// Mean number in the vertiport L (approach queue excluded) is built from
+// the interior-count labels exported by the open models:
+//   taxi_in_count_i, taxi_out_count_i   (exact counts, i = 0..k_taxi)
+//   svc_at_least_k, rdy_at_least_k      (cumulative, k = 1..M)
+//   pad_in_system, pad_out_system       (V1/V2; V3 uses pad1/pad2_* labels)
+//   L = sum_i i*S=?["taxi_in_count_i"] + ... + E[Svc] + E[Rdy]
+//         + P(pad_in) + P(pad_out)
+//   delay W = L / lambda_eff,  lambda_eff = arr_rate * (1 - P_block)
+// Note: app_count_* labels are no longer exported; the approach queue sits
+// outside the vertiport boundary used for L and W.
 
-// ---- V3 one-way transit blocking ------------------------------------
-S=? [ "small_transit_blocked_1" ]
-S=? [ "large_transit_blocked_1" ]
+// ---- Resilience sensitivity (V1_Sensitivity_*_SBrs, fig3) ----------
+// Pad:        S=? [ "pad_closed" ]
+// Stand:      S=? [ "stands_out_1" ], "stands_out_2", "stands_out_3"
+// Weather:    S=? [ "weather_bad" ], S=? [ "nominal" ]
+// Turnaround: rate_service set via -c (no fault states)
+// Throughput R=?[S] is evaluated while sweeping the fault rate or the
+// turnaround time, read against the plain V1 nominal baseline at N=6.
 
-// ---- Open M/M/c/K arrivals (Vertiport_V1_Open / V2_Open) -------------
-S=? [ "approach_full" ]   // PASTA blocking/loss probability
-//
-// Mean in system L is computed by scripts from:
-//   app_count_i, taxi_in_count_i, taxi_out_count_i  (exact counts, i = 0..k)
-//   svc_at_least_k, rdy_at_least_k                  (cumulative, k = 1..M)
-//   pad_in_system, pad_out_system
-//
-//   L = sum_i i·S=?["app_count_i"] + … + E[Svc] + E[Rdy] + P(pad_in) + P(pad_out)
-//   E[Svc] = sum_k S=?["svc_at_least_k"]   (same tail-sum formula as above)
-//   delay = L / lambda_eff,  lambda_eff = arr_rate × (1 − P_block)
+// ---- Weather x stand-out compound capacity (fig6) ------------------
+// {V1,V2}_Weather_StandOut_k{1,2,3} and _Sensitivity_Weather (k=0).
+// Sustained capacity under a stochastic weather channel with k stands
+// held out of service:
+R=? [ S ]                     // x 60 = flights/hour at the swept P(bad)
 
-// ---- Resilience (Vertiport_V1_Resilience_*_SBrs) --------------------
-// Pad:     S=? [ "pad_closed" ]
-// Stand:   S=? [ "stands_out_1" ]
-// Weather: S=? [ "weather_bad" ], S=? [ "nominal" ]
-// Turnaround: rate_service via -c (no fault states)
-// Throughput (R=?[S]) is evaluated while sweeping fault_rate or turnaround time;
-// fig4 compares degraded throughput against the plain V1 nominal baseline at N=6.
-
-// ---- Pad recovery (Vertiport_V1_Recovery_PadClosed) -----------------
-// Initial state: FATO.Closed; repair only (no fault).
+// ---- Transient throughput recovery (fig4/fig5 throughput panels) ---
+// {V1,V3}_Recovery_PadClosed, {V1,V2}_Recovery_Compound_k*.
+// Initial state = the fault state (pad Closed, + k stands Out); repair only.
 const double t;
-R=? [ I=t ]                    // instant take-off rate (×60 = flights/hour, fig4 right)
+R=? [ I=t ]                    // instant take-off rate (x60 = flights/hour)
+
+// ---- Recovery probability (fig4b / fig5b, module recovery_prob) ----
+// Same recovery models.  "recovered" is a structural target: the pad has
+// reopened and the approach queue has drained to its nominal level of at
+// most 2 aircraft (the 90% fault-free operating envelope).  The recovery
+// models export the counter family app_at_0 .. app_at_N (approach holds
+// exactly a aircraft) and the fault labels pad_closed / stand_out.
+//
+// fig4b  P[F<=t recovered],  recovered = pad reopened AND queue drained:
+P=? [ F<=t (!"pad_closed" & ("app_at_0" | "app_at_1" | "app_at_2")) ]
+//
+// fig5b  P[F<=t restored],  restored = recovered AND every stand back:
+P=? [ F<=t (!"pad_closed" & !"stand_out" & ("app_at_0" | "app_at_1" | "app_at_2")) ]
+//
+// run_analysis.py (module recovery_prob) computes these by transient
+// reachability with the target set made absorbing.  The drained threshold
+// is RECOVERY_PROB_TARGET (default 2; robust to 1 and 3).
+
+// ---- Resilience requirement envelope (fig_envelope) ----------------
+// {V1,V2}_Recovery_Compound_k2 (pad Closed + 2 stands Out; repair only).
+// Each deadline t has two components from the same compound-recovery CTMC:
+//   p*(t)  = P[F<=t phi],  phi = pad reopened AND every stand back AND the
+//            approach queue drained to at most 2 (as fig5b 'restored'):
+P=? [ F<=t (!"pad_closed" & !"stand_out" & ("app_at_0" | "app_at_1" | "app_at_2")) ]
+//   C_d(t) = expected cumulative take-offs up to t (retained service):
+R=? [ C<=t ]
+// run_analysis.py (module envelope) forms the retained-service ratio
+//   rho(t) = C_d(t) / ((T_nom/60) * t),  T_nom = N=6 nominal throughput.
+// The feasible region is the deadlines where p*(t) >= p (p = 0.8/0.9/0.95).
+
+// ---- Long-run service-level resilience (fig_sla_resilience) --------
+// {V1,V2}_Availability_SBrs: healthy start, pad and stand faults are both
+// injected AND repaired (recurrent), so the operational state recurs.
+// Fault onset rates follow the sensitivity convention lambda = P*mu/(1-P)
+// (pad P=1%, stand P=3%; pad repair 10 min, stand repair 20 min).
+// op(d) = the surface sustains demand d (fph) = pad open AND at most a
+// demand-dependent number of stands out.  The tolerated outage count is
+// read from the fig6 capacity ladder (at d=10: V1 <=1 out, V2 <=2).
+// Labels: pad_closed, out_at_least_k (k = 1..M).  op(d) tolerating k out:
+//   (!"pad_closed") & (!"out_at_least_{k+1}")
+// (a) survival: probability demand d is met throughout [0,t] (here V1, d=10):
+// (t is declared above for the transient recovery queries)
+P=? [ G<=t ((!"pad_closed") & (!"out_at_least_2")) ]
+// (b) steady-state SLA availability (long-run fraction of time op(d) holds):
+S=? [ (!"pad_closed") & (!"out_at_least_2") ]
+// run_analysis.py (module availability) sweeps t for the survival curve,
+// maps each demand to its stand-outage threshold, and derives the guaranteed
+// horizon t*(d) = max t with P[G<=t op(d)] >= 0.9 plus the mean time to breach.

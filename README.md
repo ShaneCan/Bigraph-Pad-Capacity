@@ -25,7 +25,7 @@ Capacity/Throughput (flights/hour) is the number of flight operations (each **la
         ┌─────────┬───────┼
         │         │       │       
    ┌────▼───┐┌────▼──┐┌───▼───┐
-   │Stand 1 ││Stand 2││Stand 3│
+   │Stand 3 ││Stand 2││Stand 1│
    └────────┘└───────┘└───────┘
 ```
 
@@ -49,7 +49,7 @@ Capacity/Throughput (flights/hour) is the number of flight operations (each **la
         ┌─────────┬───────┼───────┬
         │         │       │       │  
    ┌────▼───┐┌────▼──┐┌───▼───┐┌──▼────┐
-   │Stand 1 ││Stand 2││Stand 3││Stand 4│
+   │Stand 4 ││Stand 3││Stand 2││Stand 1│
    └────────┘└───────┘└───────┘└───────┘
 ```
 
@@ -63,7 +63,7 @@ Capacity/Throughput (flights/hour) is the number of flight operations (each **la
            ┌────────────────┴────────────────┐
            │                  │ 
      ┌─────▼─────┐                     ┌─────▼─────┐
-     │ SmallTLOF │◄───  TaxiwayS2  ───►│ LargeTLOF │
+     │     TLOF     │                                          │     TLOF      │
      │     └─────┬─────┘                     └─────┬─────┘
            │                                 │
        TaxiwayS1                         TaxiwayS3
@@ -74,7 +74,7 @@ Capacity/Throughput (flights/hour) is the number of flight operations (each **la
         ┌─────────┬───────┼───────┬
         │         │       │       │  
    ┌────▼───┐┌────▼──┐┌───▼───┐┌──▼────┐
-   │Stand 1 ││Stand 2││Stand 3││Stand 4│
+   │Stand 4 ││Stand 3││Stand 2││Stand 1│
    └────────┘└───────┘└───────┘└───────┘
 ```
 
