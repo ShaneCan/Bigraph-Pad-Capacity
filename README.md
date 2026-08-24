@@ -39,10 +39,6 @@ This project takes a **formal-methods** stance instead:
 - **Verifiable resilience.** Recovery is formalised as
   `P=?[F<=t φ]` (return to normal within a deadline) and long-run service as
   `P=?[G<=t op(d)]` (demand `d` held throughout a horizon), both discharged by PRISM.
-- **Design-relevant findings.** Capacity is stand-limited rather than FATO-limited;
-  the slowest-to-repair resource governs recovery; and an extra stand pushes the
-  "capacity cliff" outward, extending the horizon over which a service level can be
-  guaranteed.
 
 ---
 
