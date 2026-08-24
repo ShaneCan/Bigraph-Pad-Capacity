@@ -79,6 +79,7 @@ cd eVTOL_Vertiport
 python3 scripts/run_analysis.py            # all modules, in pipeline order
 python3 scripts/run_analysis.py --list     # list module names
 python3 scripts/run_analysis.py capacity open   # run selected modules only
+```
 
 ## How the pipeline works
 
