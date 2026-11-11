@@ -1,17 +1,18 @@
 # V1: one aircraft becomes AOG during a pre-departure motor test on the FATO.
-# Export: -c n_evtol=6,incident_rate=1,tow_rate=0.06666666666666667
-# The analysis conditions the fault-free stationary distribution on PadOut,
-# then applies aog at t=0. The trigger rate only exports the event mapping;
-# it is not an estimated AOG frequency. No second incident can occur.
-# Towed records off-site removal and immediate replacement by a spare aircraft.
-# It is an audit marker, not a member of the circulating population.
+# Export: -c n_evtol=6,incident_rate=1,clearance_scale=1
+# Five sequential exponential phases have means 3.5, 0.5, 3, 5, 3 min.
 # Conservation: AppN + TiN + ToN + #Svc + #Rdy + #occupied FATO = N.
 
 ctrl FATO = 0;
 atomic ctrl Free = 0;
 atomic ctrl PadIn = 0;
 atomic ctrl PadOut = 0;
-atomic ctrl Blocked = 0;
+ctrl Blocked = 0;
+atomic ctrl DetectSecure = 0;
+atomic ctrl TowDecision = 0;
+atomic ctrl TowPosition = 0;
+atomic ctrl TowAttach = 0;
+atomic ctrl TowAway = 0;
 atomic ctrl Towed = 0;
 ctrl Incident = 0;
 atomic ctrl Armed = 0;
@@ -51,18 +52,33 @@ fun react takeoff(a) = FATO.PadOut | Approach.AppN(a)
 
 # Blocked retains the disabled aircraft and cannot use nominal clear/takeoff.
 react aog = FATO.PadOut | Incident.Armed
-  -[incident_rate]-> FATO.Blocked | Incident.Spent;
+  -[incident_rate]-> FATO.Blocked.DetectSecure | Incident.Spent;
+# Aircraft remains on the FATO throughout all five clearance phases.
+# Means are scenario assumptions, not minimum durations or ICAO requirements.
+react secure = FATO.Blocked.DetectSecure
+  -[clearance_scale / 3.5]-> FATO.Blocked.TowDecision;
+react decide = FATO.Blocked.TowDecision
+  -[clearance_scale / 0.5]-> FATO.Blocked.TowPosition;
+react position = FATO.Blocked.TowPosition
+  -[clearance_scale / 3.0]-> FATO.Blocked.TowAttach;
+react attach = FATO.Blocked.TowAttach
+  -[clearance_scale / 5.0]-> FATO.Blocked.TowAway;
 # One tow removes the AOG aircraft to an external maintenance area and admits
 # a spare into Approach, maintaining N circulating aircraft without assuming
 # that the disabled aircraft has been repaired.
-# There is no extra nominal 30-second clear stage after this 15-minute mean.
-fun react tow(a) = FATO.Blocked | Approach.AppN(a)
-  -[tow_rate]-> FATO.Free | Approach.AppN(a + 1) | Towed;
+# Only the last phase releases the FATO AND its safety area; no extra buffer.
+fun react tow(a) = FATO.Blocked.TowAway | Approach.AppN(a)
+  -[clearance_scale / 3.0]-> FATO.Free | Approach.AppN(a + 1) | Towed;
 
 big takeoff_enabled = FATO.PadOut;
 big armed = Incident.Armed;
 big spent = Incident.Spent;
-big blocked = FATO.Blocked;
+big blocked = FATO.Blocked.id;
+big blocked_detect = FATO.Blocked.DetectSecure;
+big blocked_decision = FATO.Blocked.TowDecision;
+big blocked_position = FATO.Blocked.TowPosition;
+big blocked_attachment = FATO.Blocked.TowAttach;
+big blocked_towaway = FATO.Blocked.TowAway;
 big towed = Towed;
 big pad_in = FATO.PadIn;
 big pad_out = FATO.PadOut;
@@ -87,8 +103,11 @@ begin sbrs
   int counts = [0:1:n_evtol];
   init s0;
   rules = [{land(pos), clear_pad(below), enter_stand(pos), turnaround,
-            leave_stand(below), lineup(pos), takeoff(below), aog, tow(below)}];
+            leave_stand(below), lineup(pos), takeoff(below), aog,
+            secure, decide, position, attach, tow(below)}];
   preds = {takeoff_enabled[rew_takeoff], armed, spent, blocked, towed,
+           blocked_detect, blocked_decision, blocked_position,
+           blocked_attachment, blocked_towaway,
            pad_in, pad_out, app_at(counts), taxi_in_at(counts),
            taxi_out_at(counts), svc_ge_1, svc_ge_2, svc_ge_3,
            rdy_ge_1, rdy_ge_2, rdy_ge_3};

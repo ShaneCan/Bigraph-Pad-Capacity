@@ -1224,6 +1224,13 @@ def run_turnaround(n=6):
 # ---------------------------------------------------------------------
 INCIDENT_DIR = Path(ANALYSIS_DIR) / "incidents"
 INCIDENT_TIME_GRID = tuple(float(t) for t in range(0, 121, 2))
+AOG_CLEARANCE_PHASES = (
+    ("blocked_detect", 3.5),
+    ("blocked_decision", 0.5),
+    ("blocked_position", 3.0),
+    ("blocked_attachment", 5.0),
+    ("blocked_towaway", 3.0),
+)
 INCIDENT_MODELS = {
     "aog": "Vertiport_V1_AOG_Tow_SBrs.big",
     "charging": "Vertiport_V1_Charging_Recovery_SBrs.big",
@@ -1316,6 +1323,7 @@ def _incident_transient_rewards(q, initial, rewards, times):
 def _incident_labels(csl, n, population):
     import numpy as np
     names = ["armed", "spent", "blocked", "towed", "charging_down", "pad_in", "pad_out"]
+    names += [name for name, _ in AOG_CLEARANCE_PHASES]
     names += [f"{prefix}_{i}" for prefix in ("app_at", "taxi_in_at", "taxi_out_at")
               for i in range(population+1)]
     names += [f"{prefix}_ge_{i}" for prefix in ("svc", "rdy") for i in (1, 2, 3)]
@@ -1332,6 +1340,64 @@ def _incident_labels(csl, n, population):
     for prefix in ("svc", "rdy"):
         counts[prefix] = sum(masks[f"{prefix}_ge_{i}"] for i in (1, 2, 3))
     return labels, masks, counts
+
+
+def _incident_aog_phases(n, edges, labels, masks, counts, mean):
+    """Validate the serial clearance phases and audit their exported rates."""
+    import numpy as np
+    phase_masks = np.array([masks[name] for name, _ in AOG_CLEARANCE_PHASES])
+    if not np.array_equal(phase_masks.sum(axis=0), masks["blocked"]):
+        raise ValueError("Each blocked state must contain exactly one clearance phase")
+    phase_of = phase_masks.argmax(axis=0)
+    progression = np.zeros(n)
+    blocked = labels["blocked"]
+    last = len(AOG_CLEARANCE_PHASES)-1
+    for source, target, rate in edges:
+        if source not in blocked:
+            if target in blocked:
+                if (phase_of[target] != 0 or source not in labels["armed"]
+                        or source not in labels["pad_out"]):
+                    raise ValueError("AOG must enter detection from an armed departure state")
+                if any(counts[key][source] != counts[key][target] for key in counts):
+                    raise ValueError("Incident onset changes other aircraft locations")
+            continue
+        current = phase_of[source]
+        if target in blocked:
+            following = phase_of[target]
+            if following == current:
+                continue  # Ground operations can continue without advancing clearance.
+            if following != current+1:
+                raise ValueError("Clearance phase skipped or reversed")
+            if (any(counts[key][source] != counts[key][target] for key in counts)
+                    or masks["towed"][source] != masks["towed"][target]):
+                raise ValueError("Clearance phase advancement moves an aircraft")
+        elif current != last:
+            raise ValueError("FATO released before the tow-away phase completes")
+        progression[source] += rate
+    rates = []
+    for index, (name, base_mean) in enumerate(AOG_CLEARANCE_PHASES):
+        states = sorted(labels[name])
+        if not states:
+            raise ValueError("Unreachable clearance phase: "+name)
+        actual = progression[states]
+        expected = 15.0 / (mean*base_mean)
+        # BigraphER's .tra export rounds to four significant figures. Record
+        # the actual rates and check that differences are limited to rounding.
+        if (not np.allclose(actual, expected, rtol=5.1e-4, atol=1e-12)
+                or not np.allclose(actual, actual[0], rtol=1e-12)):
+            raise ValueError("Unexpected or state-dependent clearance rate: "+name)
+        rates.append(float(actual[0]))
+    phase_means = 1/np.asarray(rates)
+    return {
+        "phase_order_checked": True,
+        "clearance_distribution": "hypoexponential",
+        "phase_labels": [name for name, _ in AOG_CLEARANCE_PHASES],
+        "requested_phase_means_min": [base*mean/15 for _, base in AOG_CLEARANCE_PHASES],
+        "exported_phase_rates": rates,
+        "exported_phase_means_min": phase_means.tolist(),
+        "effective_mean_recovery_min": float(phase_means.sum()),
+        "clearance_coefficient_of_variation": float(np.linalg.norm(phase_means)/phase_means.sum()),
+    }
 
 
 def _incident_check_semantics(kind, n, edges, labels, masks, counts, rate, population):
@@ -1376,6 +1442,10 @@ def _incident_check_semantics(kind, n, edges, labels, masks, counts, rate, popul
             if (counts["svc"][target] > counts["svc"][source]
                     and counts["taxi_in_at"][target] < counts["taxi_in_at"][source]):
                 admission_while_down += 1
+    if kind == "aog":
+        phase_checks = _incident_aog_phases(n, edges, labels, masks, counts, 1/rate)
+        return {"aircraft_conserved": True, "one_shot": True,
+                "disabled_states": len(disabled), **phase_checks}
     exported_rates = clearance[list(disabled)]
     # This BigraphER build rounds exported .tra rates (1/15 -> 0.06667).
     # Audit that rounding explicitly and use the exported rate in clock checks.
@@ -1394,8 +1464,10 @@ def _incident_check_semantics(kind, n, edges, labels, masks, counts, rate, popul
 def _incident_build(kind, population, mean):
     import numpy as np
     INCIDENT_DIR.mkdir(parents=True, exist_ok=True)
-    rate_name = "tow_rate" if kind == "aog" else "charging_repair_rate"
-    bindings = f"n_evtol={population},incident_rate=1,{rate_name}={1/mean:.17g}"
+    if kind == "aog":
+        bindings = f"n_evtol={population},incident_rate=1,clearance_scale={15/mean:.17g}"
+    else:
+        bindings = f"n_evtol={population},incident_rate=1,charging_repair_rate={1/mean:.17g}"
     tag = f"{kind}_N{population}_mean{mean:g}"
     source = Path(ROOT) / INCIDENT_MODELS[kind]
     command = [BIGRAPHER, "validate", "-q", "-c", bindings, str(source)]
@@ -1459,7 +1531,7 @@ def _incident_prism_check(tag, generated, initial, expected, times=(30, 60)):
 def run_incident(kind, population=6):
     import numpy as np
     import scipy
-    means = (5., 15., 30.) if kind == "aog" else (10., 20., 30.)
+    means = (15., 20., 30.) if kind == "aog" else (10., 20., 30.)
     rows, metadata = [], []
     for mean in means:
         print(f"[{kind}] N={population}, mean clearance/repair={mean:g} min", flush=True)
@@ -1470,9 +1542,23 @@ def run_incident(kind, population=6):
         probabilities, cumulative = _incident_transient_rewards(q, initial, rewards, INCIDENT_TIME_GRID)
         disabled_key = "blocked" if kind == "aog" else "charging_down"
         down = probabilities @ masks[disabled_key]
-        exported_rate = info["checks"]["exported_recovery_rate"]
-        if not np.allclose(down, np.exp(-np.asarray(INCIDENT_TIME_GRID)*exported_rate), atol=1e-9):
-            raise ValueError("The shared recovery clock is not Exp(1/mean)")
+        if kind == "aog":
+            from scipy.linalg import expm
+            rates = np.asarray(info["checks"]["exported_phase_rates"])
+            serial = np.diag(-rates) + np.diag(rates[:-1], k=1)
+            independent = np.array([expm(serial*t)[0] for t in INCIDENT_TIME_GRID])
+            phase_masks = np.array([masks[name] for name, _ in AOG_CLEARANCE_PHASES])
+            observed = probabilities @ phase_masks.T
+            error = float(np.max(np.abs(observed-independent)))
+            if error > 1e-9:
+                raise ValueError("Coupled CTMC disagrees with independent clearance phases")
+            info["checks"]["max_phase_probability_error"] = error
+            info["checks"]["clearance_probability_by_minute"] = {
+                str(t): float(1-expm(serial*t)[0].sum()) for t in (1, 2, 5, 15, 30)}
+        else:
+            exported_rate = info["checks"]["exported_recovery_rate"]
+            if not np.allclose(down, np.exp(-np.asarray(INCIDENT_TIME_GRID)*exported_rate), atol=1e-9):
+                raise ValueError("The shared repair clock is not Exp(1/mean)")
         # Conditioning reveals congestion while a shared charging outage persists.
         if kind == "charging":
             q_down = _incident_generator(n, [(s,d,r) for s,d,r in edges
