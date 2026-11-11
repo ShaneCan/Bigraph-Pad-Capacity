@@ -1,0 +1,90 @@
+# V1: one shared charging-supply outage; the FATO never fails in this model.
+# Export: -c n_evtol=6,incident_rate=1,charging_repair_rate=0.05
+# Analysis applies the outage to the nominal stationary distribution at t=0.
+# incident_rate exports the event mapping, not a calibrated failure frequency.
+# Down disables only Svc -> Rdy. Empty stands remain accessible to taxi-in;
+# Svc aircraft wait there, and already-ready aircraft can still depart.
+# One repair transition restores the shared supply for ALL stands together.
+
+ctrl FATO = 0;
+atomic ctrl Free = 0;
+atomic ctrl PadIn = 0;
+atomic ctrl PadOut = 0;
+ctrl Charging = 0;
+atomic ctrl Up = 0;
+atomic ctrl Down = 0;
+ctrl Incident = 0;
+atomic ctrl Armed = 0;
+atomic ctrl Spent = 0;
+ctrl Approach = 0; atomic fun ctrl AppN(k) = 0;
+ctrl TaxiIn = 0; atomic fun ctrl TiN(k) = 0;
+ctrl TaxiOut = 0; atomic fun ctrl ToN(k) = 0;
+ctrl Stands = 0;
+ctrl Stand = 0;
+atomic ctrl Empty = 0;
+atomic ctrl Svc = 0;
+atomic ctrl Rdy = 0;
+
+float rate_land = 1.0;
+float rate_clear = 2.0;
+float rate_enter = 1.3333333333;
+float rate_service = 0.1;
+float rate_leave = 4.0;
+float rate_lineup = 1.5;
+float rate_takeoff = 1.0;
+int rew_takeoff = 1;
+
+fun react land(a) = Approach.AppN(a) | FATO.Free
+  -[rate_land]-> Approach.AppN(a - 1) | FATO.PadIn;
+fun react clear_pad(t) = FATO.PadIn | TaxiIn.TiN(t)
+  -[rate_clear]-> FATO.Free | TaxiIn.TiN(t + 1);
+fun react enter_stand(t) = TaxiIn.TiN(t) | Stands.(Stand.Empty | id)
+  -[rate_enter]-> TaxiIn.TiN(t - 1) | Stands.(Stand.Svc | id);
+# Exponential turnaround resumes after repair; no service completes while Down.
+react turnaround = Stands.(Stand.Svc | id) | Charging.Up
+  -[rate_service]-> Stands.(Stand.Rdy | id) | Charging.Up;
+fun react leave_stand(o) = Stands.(Stand.Rdy | id) | TaxiOut.ToN(o)
+  -[rate_leave]-> Stands.(Stand.Empty | id) | TaxiOut.ToN(o + 1);
+fun react lineup(o) = TaxiOut.ToN(o) | FATO.Free
+  -[rate_lineup]-> TaxiOut.ToN(o - 1) | FATO.PadOut;
+fun react takeoff(a) = FATO.PadOut | Approach.AppN(a)
+  -[rate_takeoff]-> FATO.Free | Approach.AppN(a + 1);
+
+react charging_outage = Charging.Up | Incident.Armed
+  -[incident_rate]-> Charging.Down | Incident.Spent;
+react charging_repair = Charging.Down
+  -[charging_repair_rate]-> Charging.Up;
+
+big takeoff_enabled = FATO.PadOut;
+big armed = Incident.Armed;
+big spent = Incident.Spent;
+big charging_down = Charging.Down;
+big pad_in = FATO.PadIn;
+big pad_out = FATO.PadOut;
+fun big app_at(a) = Approach.AppN(a);
+fun big taxi_in_at(t) = TaxiIn.TiN(t);
+fun big taxi_out_at(o) = TaxiOut.ToN(o);
+big svc_ge_1 = Stands.(Stand.Svc | id);
+big svc_ge_2 = Stands.(Stand.Svc | Stand.Svc | id);
+big svc_ge_3 = Stands.(Stand.Svc | Stand.Svc | Stand.Svc | id);
+big rdy_ge_1 = Stands.(Stand.Rdy | id);
+big rdy_ge_2 = Stands.(Stand.Rdy | Stand.Rdy | id);
+big rdy_ge_3 = Stands.(Stand.Rdy | Stand.Rdy | Stand.Rdy | id);
+
+big s0 = Approach.AppN(n_evtol) | FATO.Free | TaxiIn.TiN(0)
+  | TaxiOut.ToN(0) | Stands.(Stand.Empty | Stand.Empty | Stand.Empty)
+  | Charging.Up | Incident.Armed;
+
+begin sbrs
+  int pos = [1:1:n_evtol];
+  int below = [0:1:n_evtol - 1];
+  int counts = [0:1:n_evtol];
+  init s0;
+  rules = [{land(pos), clear_pad(below), enter_stand(pos), turnaround,
+            leave_stand(below), lineup(pos), takeoff(below),
+            charging_outage, charging_repair}];
+  preds = {takeoff_enabled[rew_takeoff], armed, spent, charging_down,
+           pad_in, pad_out, app_at(counts), taxi_in_at(counts),
+           taxi_out_at(counts), svc_ge_1, svc_ge_2, svc_ge_3,
+           rdy_ge_1, rdy_ge_2, rdy_ge_3};
+end

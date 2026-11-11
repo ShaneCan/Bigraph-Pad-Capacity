@@ -10,7 +10,10 @@ For each model / parameter point it
 Outputs
   analysis/fig1_capacity_oph.csv        fig1 — V1/V2/V3 capacity vs N (N = 4..8)
   analysis/fig2_open_v1_v2.csv          fig2 — open V1/V2 vs lambda
-  analysis/fig3_sensitivity_oph.csv     fig3 — V1 sensitivity vs unavailability P (pad/stand/weather) + turnaround
+  analysis/revision/exposure.csv       fig3 — V1 calibrated actual exposure (pad/stand/weather)
+  analysis/revision/turnaround.csv     fig3 — V1 turnaround time sweep
+  analysis/fig_aog_recovery.csv        fig4(d) — AOG tow with immediate spare replacement
+  analysis/fig_charging_recovery.csv   sensitivity(e) — shared charging outage
   analysis/fig4_recovery_throughput.csv fig4 — V1 pad-closed transient throughput R=?[I=t]
   analysis/fig4_recovery_v3.csv         fig4 — V3 dual-FATO pad-closed recovery (mu=0.1)
   analysis/fig5_compound_recovery.csv   fig5 — V1 pad-closed + k stands out recovery erosion
@@ -37,6 +40,9 @@ One-click rerun of the NEW figure comparisons (existing V1 data untouched):
 
 import argparse
 import csv
+import hashlib
+import json
+from pathlib import Path
 import math
 import os
 import re
@@ -56,14 +62,17 @@ MAX_STATES = "20000000"
 RESULT_RE = re.compile(r"Result:\s*([-+0-9.eE]+)")
 
 
-def generate(model_file, consts, tag):
+def generate(model_file, consts, tag, *, output_dir=None):
     """Run BigraphER -> .tra/.csl/.rews; return (tra, csl, rews, n_states)."""
-    base = os.path.join(PRISM_DIR, tag)
+    base = os.path.join(output_dir or PRISM_DIR, tag)
     tra, csl, rews = base + ".tra", base + ".csl", base + ".rews"
     cmd = [BIGRAPHER, "full", "--solver=MCARD", "-c", consts,
            "-M", MAX_STATES, "-q", "-p", tra, "-l", csl, "-r", rews,
            os.path.join(ROOT, model_file)]
     res = subprocess.run(cmd, capture_output=True, text=True)
+    if output_dir:
+        with open(base + ".build.log", "w") as log:
+            log.write("$ " + " ".join(cmd) + "\n" + res.stdout + "\n" + res.stderr)
     if res.returncode != 0 or not os.path.exists(tra):
         sys.stderr.write(f"[bigrapher FAILED] {tag}\n{res.stderr}\n")
         return None
@@ -72,7 +81,7 @@ def generate(model_file, consts, tag):
     return tra, csl, rews, n_states
 
 
-def prism(tra, csl, rews, queries, consts=None, maxiters=2_000_000):
+def prism(tra, csl, rews, queries, consts=None, maxiters=2_000_000, *, epsilon=None):
     """Model-check; return list of float results (one per query, in order)."""
     props = tra + ".props"
     as_csl_query(props, csl, queries)
@@ -81,7 +90,14 @@ def prism(tra, csl, rews, queries, consts=None, maxiters=2_000_000):
            "-ctmc", props, "-gs", "-maxiters", str(maxiters)]
     if consts:
         cmd += ["-const", consts]
+    if epsilon is not None:
+        cmd += ["-epsilon", str(epsilon)]
     res = subprocess.run(cmd, capture_output=True, text=True)
+    if epsilon is not None:
+        with open(props + ".log", "w") as log:
+            log.write("$ " + " ".join(cmd) + "\n" + res.stdout + "\n" + res.stderr)
+        if res.returncode or len(RESULT_RE.findall(res.stdout)) != len(queries):
+            raise RuntimeError("Missing sensitivity PRISM result; see " + props + ".log")
     out = [float(m) for m in RESULT_RE.findall(res.stdout)]
     if len(out) != len(queries):
         sys.stderr.write(f"[prism WARN] expected {len(queries)} results, "
@@ -399,11 +415,8 @@ RESILIENCE_RATE_KEY = {
 }
 TURNAROUND_MINUTES = [10, 15, 20, 30]
 
-# fig3/fig6 share one physically comparable severity axis: steady-state
-# unavailability P (the fraction of time the resource is closed / degraded).
-# Each stressor is a 2-state up<->down CTMC with onset rate lambda and recovery
-# rate mu; in steady state P = lambda / (lambda + mu), so the BigraphER onset
-# rate is back-computed from the target P and the panel's own repair time.
+# Actual exposure targets for Fig.3. Resource onset is idle-gated;
+# lambda/(lambda+mu) applies directly only to the weather channel.
 UNAVAIL_GRID = [0.05, 0.10, 0.15, 0.20, 0.30]   # P=0 is handled separately
 
 
@@ -611,67 +624,9 @@ def run_pad_recovery_v3(n=6):
 
 
 def run_resilience_depth(n=6):
-    print(f"[3/4] V1 isolated resilience + turnaround (N={n}) ...")
-    rows = []
-    g0 = generate("Vertiport_V1_1FATO_3Stand_SBrs.big", f"n_evtol={n}",
-                  f"V1_nominal_N{n}")
-    if not g0:
-        return
-    tra0, csl0, rews0, _states0 = g0
-    nominal_throughput = 60 * first_result(tra0, csl0, rews0, 'R=? [ S ]')
-    print(f"   nominal N={n}: throughput={nominal_throughput:.2f}")
-
-    # Panels a/b/c share one severity axis: steady-state unavailability P.  The
-    # onset rate lambda is back-computed from P and the panel's own repair rate
-    # mu (P = lambda / (lambda + mu)).  P=0 is the nominal baseline itself (no
-    # model run; BigraphER would reject an exact 0.0 rate anyway).
-    for panel in ("pad", "stand", "weather"):
-        rate_key = RESILIENCE_RATE_KEY[panel]
-        repair = RESILIENCE_REPAIR[panel]
-        mfile = RESILIENCE_MODELS[panel]
-        mu = next(iter(repair.values()))    # this panel's recovery rate
-        rows.append([panel, "baseline", "", round(nominal_throughput, 3),
-                     "baseline", ""])
-        # P=0 curve point == nominal, so each curve starts at the nominal line.
-        rows.append([panel, "unavailability", 0.0, round(nominal_throughput, 3),
-                     "degraded", 0.0])
-        for p in UNAVAIL_GRID:
-            lam = lambda_from_unavailability(p, mu)
-            consts = ",".join(
-                [f"n_evtol={n}", f"{rate_key}={lam}"]
-                + [f"{k}={v}" for k, v in repair.items()]
-            )
-            tag = f"V1_res_{panel}_N{n}_p{p}"
-            g = generate(mfile, consts, tag)
-            if not g:
-                continue
-            tra, csl, rews, states = g
-            throughput = 60 * first_result(tra, csl, rews, 'R=? [ S ]')
-            rows.append([panel, "unavailability", p, round(throughput, 3),
-                         "degraded", round(lam, 6)])
-            print(f"   {panel} P={p} ({rate_key}={lam:.6f}): "
-                  f"states={states} throughput={throughput:.2f}")
-
-    rows.append(["turnaround", "baseline", "", round(nominal_throughput, 3),
-                 "baseline", ""])
-    for minutes in TURNAROUND_MINUTES:
-        rate_service = 1.0 / minutes
-        consts = f"n_evtol={n},rate_service={rate_service}"
-        tag = f"V1_turnaround_N{n}_t{minutes}"
-        g = generate("Vertiport_V1_Sensitivity_Turnaround_SBrs.big", consts, tag)
-        if not g:
-            continue
-        tra, csl, rews, states = g
-        throughput = 60 * first_result(tra, csl, rews, 'R=? [ S ]')
-        curve = "baseline" if minutes == 10 else "degraded"
-        rows.append(["turnaround", "minutes", minutes, round(throughput, 3),
-                     curve, ""])
-        print(f"   turnaround {minutes} min: states={states} throughput={throughput:.2f}")
-
-    write_csv("fig3_sensitivity_oph.csv",
-              ["panel", "param_name", "param_value", "throughput", "curve",
-               "lambda_rate"],
-              rows)
+    """Original resilience entry point, now using calibrated actual exposure."""
+    run_exposure(n)
+    run_turnaround(n)
 
 
 # ---------------------------------------------------------------------
@@ -1128,7 +1083,452 @@ def run_availability(n=6):
                "mttb", "throughput_ss"], envelope_rows)
 
 
+
+# ---------------------------------------------------------------------
+# Calibrated Fig.3: retained sensitivity computation, without revision imports.
+# NumPy/SciPy are loaded only when these two modules are invoked.
+# ---------------------------------------------------------------------
+SENSITIVITY_DIR = os.path.join(ANALYSIS_DIR, "revision")
+
+
+def _sensitivity_generate(model, constants, tag):
+    """Validate source bindings, then export one sensitivity point with provenance."""
+    import hashlib
+    import json
+    from pathlib import Path
+    source = Path(ROOT) / model
+    for key, literal in re.findall(r'^\s*(?:float|int)\s+(\w+)\s*=\s*([-+0-9.eE]+)\s*;',
+                                   source.read_text(), re.M):
+        if key in constants and not math.isclose(float(literal), float(constants[key]), rel_tol=1e-12):
+            raise ValueError(f"{key} is declared as {literal}; externalise it before CLI override")
+    directory = Path(SENSITIVITY_DIR) / "ctmc"
+    directory.mkdir(parents=True, exist_ok=True)
+    bindings = ",".join(f"{k}={v:.17g}" if isinstance(v, float) else f"{k}={v}"
+                        for k,v in sorted(constants.items()))
+    command = [BIGRAPHER, "validate", "-q", "-c", bindings, str(source)]
+    validation = subprocess.run(command, capture_output=True, text=True)
+    (directory/(tag+".validate.log")).write_text("$ "+" ".join(command)+"\n"+validation.stdout+"\n"+validation.stderr)
+    if validation.returncode:
+        raise RuntimeError("Sensitivity model validation failed: "+tag)
+    generated = generate(model, bindings, tag, output_dir=str(directory))
+    if generated is None:
+        raise RuntimeError("Sensitivity model generation failed: "+tag)
+    (directory/(tag+".json")).write_text(json.dumps({
+        "source": model, "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "constants": bindings, "states": generated[3],
+        "bigrapher": subprocess.check_output([BIGRAPHER,"--version"], text=True).strip(),
+        "prism": subprocess.check_output([PRISM,"-version"], text=True).strip(),
+    }, indent=2))
+    return generated
+
+
+def _sensitivity_transitions(generated):
+    """Read transition rates and predicate masks needed for exposure calibration."""
+    import numpy as np
+    tra, csl, rews, n = generated
+    with open(tra) as f:
+        next(f)
+        edges = np.loadtxt(f, ndmin=2)
+    src, dst, rates = edges[:,0].astype(int), edges[:,1].astype(int), edges[:,2]
+    labels = {}
+    with open(csl) as f:
+        for name,body in re.findall(r'label "([^"]+)" =([^\n]*)', f.read()):
+            mask=np.zeros(n, dtype=bool)
+            mask[[int(v) for v in re.findall(r'x = (\d+)',body)]]=True
+            labels[name]=mask
+    return n,src,dst,rates,labels
+
+
+def _sensitivity_stationary(n, src, dst, rates):
+    """Solve the finite stationary distribution and verify balance."""
+    import numpy as np
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import spsolve
+    off=sp.csr_matrix((rates,(src,dst)), shape=(n,n))
+    q=off-sp.diags(np.asarray(off.sum(axis=1)).ravel())
+    a=q.T.tolil(); a[-1,:]=np.ones(n)
+    b=np.zeros(n); b[-1]=1
+    pi=np.asarray(spsolve(a.tocsc(),b))
+    if not np.all(np.isfinite(pi)) or np.min(pi)<-1e-9:
+        raise ValueError("Invalid sensitivity stationary distribution")
+    pi=np.maximum(pi,0); pi/=pi.sum()
+    if np.max(np.abs(q.T@pi))>1e-8:
+        raise ValueError("Sensitivity stationary balance residual exceeds tolerance")
+    return pi
+
+
+def run_exposure(n=6):
+    """Calibrate actual resource exposure, regenerate final points and check PRISM."""
+    import numpy as np
+    from scipy.optimize import brentq
+    nominal=_sensitivity_generate("Vertiport_V1_1FATO_3Stand_SBrs.big",
+                                 {"n_evtol":n},f"nominal_V1_N{n}")
+    theta=60*prism(*nominal[:3],["R=? [ S ]"],maxiters=8_000_000,epsilon=1e-10)[0]
+    rows=[]
+    for channel in ("pad","stand","weather"):
+        mu=next(iter(RESILIENCE_REPAIR[channel].values()))
+        parameter=RESILIENCE_RATE_KEY[channel]
+        constants={"n_evtol":n,parameter:.01,**RESILIENCE_REPAIR[channel]}
+        chain=_sensitivity_generate(RESILIENCE_MODELS[channel],constants,"exposure_topology_"+channel)
+        size,src,dst,rates,labels=_sensitivity_transitions(chain)
+        if channel=="stand":
+            count=sum(labels[f"stands_out_{k}"].astype(int) for k in (1,2,3))
+            reward=count/3
+            fault_edges=count[dst]==count[src]+1
+            queries=["R=? [ S ]"]+[f'S=? [ "stands_out_{k}" ]' for k in (1,2,3)]
+        else:
+            label="pad_closed" if channel=="pad" else "weather_bad"
+            reward=labels[label].astype(float)
+            fault_edges=(reward[dst]==1)&(reward[src]==0)
+            queries=["R=? [ S ]",f'S=? [ "{label}" ]']
+        def actual(rate):
+            adjusted=rates.copy(); adjusted[fault_edges]*=rate/.01
+            return float(_sensitivity_stationary(size,src,dst,adjusted)@reward)
+        rows.append([channel,0.,0.,0.,0.,mu,theta,nominal[3]])
+        for target in UNAVAIL_GRID:
+            upper=mu*target/(1-target)
+            while actual(upper)<target:
+                upper*=2
+                if upper>1e6:
+                    raise RuntimeError("Failed to bracket actual exposure")
+            onset=brentq(lambda rate:actual(rate)-target,1e-10,upper,xtol=1e-11)
+            constants[parameter]=onset
+            final=_sensitivity_generate(RESILIENCE_MODELS[channel],constants,f"exposure_{channel}_P{target:g}")
+            values=prism(*final[:3],queries,maxiters=8_000_000,epsilon=1e-10)
+            achieved=sum(values[1:])/3 if channel=="stand" else values[1]
+            if abs(achieved-target)>1e-4:
+                raise AssertionError("PRISM exposure calibration failed")
+            rows.append([channel,target,achieved,onset/(onset+mu),onset,mu,60*values[0],final[3]])
+            print(f"[exposure] {channel}: P={achieved:.6f}, throughput={60*values[0]:.5f}",flush=True)
+    write_csv("revision/exposure.csv",
+              ["channel","target_exposure","actual_exposure","reference_P",
+               "onset_rate","repair_rate","throughput","states"],rows)
+
+
+def run_turnaround(n=6):
+    """Use the existing model whose service rate is supplied externally."""
+    os.makedirs(SENSITIVITY_DIR,exist_ok=True)
+    rows=[]
+    for mean in TURNAROUND_MINUTES:
+        model="Vertiport_V1_Sensitivity_Turnaround_SBrs.big"
+        generated=_sensitivity_generate(model,{"n_evtol":n,"rate_service":1./mean},f"turnaround_{mean:g}")
+        theta=60*prism(*generated[:3],["R=? [ S ]"],maxiters=8_000_000,epsilon=1e-10)[0]
+        rows.append([float(mean),theta])
+        print(f"[turnaround] mean={mean}, throughput={theta:.5f}",flush=True)
+    write_csv("revision/turnaround.csv",["mean_time","throughput"],rows)
+
+
+# ---------------------------------------------------------------------
+# One-shot occupied-FATO and shared-charging incidents (warm-start CTMCs).
+# Trigger rates export event mappings; they are not calibrated fault rates.
+# ---------------------------------------------------------------------
+INCIDENT_DIR = Path(ANALYSIS_DIR) / "incidents"
+INCIDENT_TIME_GRID = tuple(float(t) for t in range(0, 121, 2))
+INCIDENT_MODELS = {
+    "aog": "Vertiport_V1_AOG_Tow_SBrs.big",
+    "charging": "Vertiport_V1_Charging_Recovery_SBrs.big",
+}
+
+
+def _incident_generator(n, edges):
+    """Row-generator; self-loops do not affect state probabilities."""
+    import numpy as np
+    import scipy.sparse as sp
+    rows, cols, values = [], [], []
+    diagonal = np.zeros(n)
+    for source, target, rate in edges:
+        if not math.isfinite(rate) or rate < 0:
+            raise ValueError("Non-finite or negative CTMC rate")
+        if source == target:
+            continue
+        rows.append(source)
+        cols.append(target)
+        values.append(rate)
+        diagonal[source] -= rate
+    return (sp.csr_matrix((values, (rows, cols)), shape=(n, n))
+            + sp.diags(diagonal)).tocsr()
+
+
+def _incident_stationary(n, edges, states):
+    """Stationary probabilities on one selected irreducible sub-chain."""
+    import numpy as np
+    from scipy.sparse.linalg import spsolve
+    ids = np.array(sorted(states), dtype=int)
+    if not len(ids):
+        raise ValueError("Empty stationary sub-chain")
+    restricted = [(s, d, r) for s, d, r in edges if s in states and d in states]
+    q = _incident_generator(n, restricted)[ids][:, ids]
+    a = q.T.tolil()
+    a[0, :] = np.ones(len(ids))
+    b = np.zeros(len(ids))
+    b[0] = 1.
+    solution = spsolve(a.tocsc(), b)
+    if not np.isfinite(solution).all() or solution.min() < -1e-10:
+        raise ValueError("Invalid stationary distribution")
+    solution = np.maximum(solution, 0)
+    solution /= solution.sum()
+    if np.max(np.abs(q.T @ solution)) > 1e-9:
+        raise ValueError("Stationary balance residual exceeds tolerance")
+    full = np.zeros(n)
+    full[ids] = solution
+    return full
+
+
+def _incident_initial_distribution(n, edges, armed, stationary):
+    """Normalised event flux gives pre-event and post-event distributions."""
+    import numpy as np
+    before, after = np.zeros(n), np.zeros(n)
+    for source, target, rate in edges:
+        if source in armed and target not in armed:
+            weight = stationary[source] * rate
+            before[source] += weight
+            after[target] += weight
+    total = after.sum()
+    if total <= 0:
+        raise ValueError("No positive stationary incident flux")
+    return before / total, after / total
+
+
+def _incident_transient_rewards(q, initial, rewards, times):
+    """Return p(t) and integral_0^t p(s)r ds (expected departures)."""
+    import numpy as np
+    import scipy.sparse as sp
+    from scipy.sparse.linalg import expm_multiply
+    initial, rewards, times = map(np.asarray, (initial, rewards, times))
+    if (len(times) < 2 or times[0] != 0 or
+            not np.allclose(np.diff(times), times[1]-times[0])):
+        raise ValueError("Use an equally spaced time grid starting at zero")
+    n = len(initial)
+    augmented = sp.bmat([
+        [q.T, sp.csr_matrix((n, 1))],
+        [sp.csr_matrix(rewards.reshape(1, -1)), sp.csr_matrix((1, 1))],
+    ], format="csr")
+    result = expm_multiply(augmented, np.r_[initial, 0.], start=0.,
+                           stop=times[-1], num=len(times), endpoint=True)
+    probabilities, cumulative = result[:, :n], result[:, n]
+    if (probabilities.min() < -1e-10 or
+            np.max(np.abs(probabilities.sum(axis=1)-1)) > 1e-9 or
+            np.min(np.diff(cumulative)) < -1e-10):
+        raise ValueError("Invalid transient distribution or cumulative reward")
+    return probabilities, cumulative
+
+
+def _incident_labels(csl, n, population):
+    import numpy as np
+    names = ["armed", "spent", "blocked", "towed", "charging_down", "pad_in", "pad_out"]
+    names += [f"{prefix}_{i}" for prefix in ("app_at", "taxi_in_at", "taxi_out_at")
+              for i in range(population+1)]
+    names += [f"{prefix}_ge_{i}" for prefix in ("svc", "rdy") for i in (1, 2, 3)]
+    labels = {name: _parse_label_states(csl, name) for name in names}
+    masks = {}
+    for name, states in labels.items():
+        masks[name] = np.zeros(n)
+        masks[name][list(states)] = 1.
+    counts = {}
+    for prefix in ("app_at", "taxi_in_at", "taxi_out_at"):
+        if not np.allclose(sum(masks[f"{prefix}_{i}"] for i in range(population+1)), 1):
+            raise ValueError("Missing or overlapping aircraft counter labels")
+        counts[prefix] = sum(i*masks[f"{prefix}_{i}"] for i in range(population+1))
+    for prefix in ("svc", "rdy"):
+        counts[prefix] = sum(masks[f"{prefix}_ge_{i}"] for i in (1, 2, 3))
+    return labels, masks, counts
+
+
+def _incident_check_semantics(kind, n, edges, labels, masks, counts, rate, population):
+    """Check operational invariants over every generated state and transition."""
+    import numpy as np
+    total = sum(counts.values()) + masks["pad_in"] + masks["pad_out"]
+    # Towed is an off-site audit marker. The replacement enters Approach in
+    # the same transition, so the circulating population remains N.
+    total += masks["blocked"]
+    if not np.allclose(total, population):
+        raise ValueError("Aircraft conservation failed")
+    if not np.allclose(masks["armed"] + masks["spent"], 1):
+        raise ValueError("One-shot incident phase is not exclusive")
+    disabled = labels["blocked" if kind == "aog" else "charging_down"]
+    clearance = np.zeros(n)
+    admission_while_down = 0
+    for source, target, transition_rate in edges:
+        if source in labels["spent"] and target in labels["armed"]:
+            raise ValueError("Repeated incident is reachable")
+        if source in disabled and target not in disabled:
+            clearance[source] += transition_rate
+            if kind == "aog":
+                if target not in labels["towed"]:
+                    raise ValueError("Blocked aircraft released without a tow")
+                if counts["app_at"][target] != counts["app_at"][source] + 1:
+                    raise ValueError("Tow must admit exactly one spare aircraft")
+                if any(counts[key][source] != counts[key][target]
+                       for key in counts if key != "app_at"):
+                    raise ValueError("Tow/replacement changes other aircraft locations")
+                if masks["pad_out"][target] or masks["pad_in"][target]:
+                    raise ValueError("Tow/replacement must release the FATO")
+            elif any(counts[key][source] != counts[key][target] for key in counts):
+                raise ValueError("Shared charging repair moves or removes aircraft")
+        if kind == "aog" and source in disabled:
+            if masks["pad_out"][source] or masks["pad_in"][source]:
+                raise ValueError("Blocked FATO is also used by another aircraft")
+            if target in disabled and counts["app_at"][target] > counts["app_at"][source]:
+                raise ValueError("Take-off while FATO is blocked")
+        if kind == "charging" and source in disabled and target in disabled:
+            if counts["rdy"][target] > counts["rdy"][source]:
+                raise ValueError("Charging service completes while supply is down")
+            if (counts["svc"][target] > counts["svc"][source]
+                    and counts["taxi_in_at"][target] < counts["taxi_in_at"][source]):
+                admission_while_down += 1
+    exported_rates = clearance[list(disabled)]
+    # This BigraphER build rounds exported .tra rates (1/15 -> 0.06667).
+    # Audit that rounding explicitly and use the exported rate in clock checks.
+    if (not np.allclose(exported_rates, rate, rtol=2e-4, atol=1e-12)
+            or not np.allclose(exported_rates, exported_rates[0], rtol=1e-12)):
+        raise ValueError("Clearance/repair rate is not the configured shared rate")
+    if kind == "charging" and not admission_while_down:
+        raise ValueError("No stand admission is possible while charging is down")
+    return {"aircraft_conserved": True, "one_shot": True,
+            "disabled_states": len(disabled),
+            "exported_recovery_rate": float(exported_rates[0]),
+            "effective_mean_recovery_min": float(1/exported_rates[0]),
+            "admission_transitions_while_down": admission_while_down}
+
+
+def _incident_build(kind, population, mean):
+    import numpy as np
+    INCIDENT_DIR.mkdir(parents=True, exist_ok=True)
+    rate_name = "tow_rate" if kind == "aog" else "charging_repair_rate"
+    bindings = f"n_evtol={population},incident_rate=1,{rate_name}={1/mean:.17g}"
+    tag = f"{kind}_N{population}_mean{mean:g}"
+    source = Path(ROOT) / INCIDENT_MODELS[kind]
+    command = [BIGRAPHER, "validate", "-q", "-c", bindings, str(source)]
+    validated = subprocess.run(command, text=True, capture_output=True)
+    (INCIDENT_DIR / (tag+".validate.log")).write_text(
+        "$ "+" ".join(command)+"\n"+validated.stdout+validated.stderr)
+    validated.check_returncode()
+    generated = generate(INCIDENT_MODELS[kind], bindings, tag, output_dir=str(INCIDENT_DIR))
+    if generated is None:
+        raise RuntimeError("BigraphER generation failed: "+tag)
+    tra, csl, rews, n = generated
+    _, edges = _parse_tra_edges(tra)
+    labels, masks, counts = _incident_labels(csl, n, population)
+    checks = _incident_check_semantics(kind, n, edges, labels, masks, counts, 1/mean, population)
+    rewards = _parse_state_rewards(rews, n)
+    if not np.allclose(rewards, masks["pad_out"]):
+        raise ValueError("Departure reward must equal the take-off rate")
+    stationary = _incident_stationary(n, edges, labels["armed"])
+    before, initial = _incident_initial_distribution(n, edges, labels["armed"], stationary)
+    np.savetxt(INCIDENT_DIR/(tag+".initial.txt"), initial, fmt="%.17g")
+    nominal = float(60*stationary@rewards)
+    info = {"source": INCIDENT_MODELS[kind], "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            "constants": bindings, "states": n, "transitions": len(edges),
+            "nominal_fph": nominal, "checks": checks}
+    return tag, generated, edges, labels, masks, counts, rewards, before, initial, info
+
+
+def _incident_prism_check(tag, generated, initial, expected, times=(30, 60)):
+    """Independent uniformisation from the identical post-event distribution."""
+    import numpy as np
+    tra = generated[0]
+    for time in times:
+        target = INCIDENT_DIR / f"{tag}.prism_t{time}.txt"
+        # PRISM may report a numerical error with exit code zero. Never accept
+        # a vector left by a previous successful invocation.
+        if target.exists():
+            target.unlink()
+        command = [PRISM, "-importtrans", tra, "-ctmc", "-explicit",
+                   "-transient", str(time), "-importinitdist", str(INCIDENT_DIR/(tag+".initial.txt")),
+                   "-exporttransient", str(target), "-epsilon", "1e-8", "-nossdetect"]
+        result = subprocess.run(command, text=True, capture_output=True)
+        (INCIDENT_DIR/f"{tag}.prism_t{time}.log").write_text(
+            "$ "+" ".join(command)+"\n"+result.stdout+result.stderr)
+        result.check_returncode()
+        if not target.exists():
+            raise RuntimeError("PRISM did not export transient probabilities")
+        lines = target.read_text().splitlines()
+        if lines and "=" in lines[0]:
+            observed = np.zeros(len(initial))
+            for line in lines:
+                index, value = line.split("=", 1)
+                observed[int(index)] = float(value)
+        else:
+            observed = np.loadtxt(target)
+        error = float(np.max(np.abs(observed-expected[int(time/(INCIDENT_TIME_GRID[1]-INCIDENT_TIME_GRID[0]))])))
+        if error > 1e-8:
+            raise ValueError(f"PRISM/SciPy transient disagreement at t={time}: {error}")
+        print(f"   PRISM t={time}: maximum probability error {error:.2g}", flush=True)
+
+
+def run_incident(kind, population=6):
+    import numpy as np
+    import scipy
+    means = (5., 15., 30.) if kind == "aog" else (10., 20., 30.)
+    rows, metadata = [], []
+    for mean in means:
+        print(f"[{kind}] N={population}, mean clearance/repair={mean:g} min", flush=True)
+        (tag, generated, edges, labels, masks, counts, rewards,
+         before, initial, info) = _incident_build(kind, population, mean)
+        n = generated[3]
+        q = _incident_generator(n, edges)
+        probabilities, cumulative = _incident_transient_rewards(q, initial, rewards, INCIDENT_TIME_GRID)
+        disabled_key = "blocked" if kind == "aog" else "charging_down"
+        down = probabilities @ masks[disabled_key]
+        exported_rate = info["checks"]["exported_recovery_rate"]
+        if not np.allclose(down, np.exp(-np.asarray(INCIDENT_TIME_GRID)*exported_rate), atol=1e-9):
+            raise ValueError("The shared recovery clock is not Exp(1/mean)")
+        # Conditioning reveals congestion while a shared charging outage persists.
+        if kind == "charging":
+            q_down = _incident_generator(n, [(s,d,r) for s,d,r in edges
+                                   if s in labels["charging_down"] and d in labels["charging_down"]])
+            outage_p, _ = _incident_transient_rewards(q_down, initial, rewards, INCIDENT_TIME_GRID)
+            waiting_given_down = outage_p @ counts["svc"]
+            if abs(waiting_given_down[-1]-min(3, population)) > 0.01:
+                raise ValueError("Persistent charging outage does not fill the three stands")
+        else:
+            waiting_given_down = np.zeros(len(INCIDENT_TIME_GRID))
+        reference = (_incident_stationary(n, edges, labels["towed"]) if kind == "aog"
+                     else _incident_stationary(n, edges, labels["spent"]-labels["charging_down"]))
+        long_run = float(60*reference@rewards)
+        if not math.isclose(long_run, info["nominal_fph"], rel_tol=1e-9):
+            raise ValueError("Recovery must retain the six-aircraft nominal baseline")
+        throughput = 60*(probabilities @ rewards)
+        waiting = probabilities @ (counts["svc"]*masks["charging_down"])
+        occupancy = probabilities @ (counts["svc"]+counts["rdy"])
+        for i, time in enumerate(INCIDENT_TIME_GRID):
+            rows.append([kind, population, mean, time, throughput[i], cumulative[i],
+                         down[i], waiting[i], occupancy[i], waiting_given_down[i],
+                         info["nominal_fph"], long_run, n])
+        # Independent CTMC solution for the central user-requested scenarios.
+        if mean == (15. if kind == "aog" else 20.):
+            _incident_prism_check(tag, generated, initial, probabilities)
+        info["long_run_fph"] = long_run
+        info["post_event_initial_sha256"] = hashlib.sha256(initial.tobytes()).hexdigest()
+        info["metrics"] = {
+            str(int(t)): {"throughput_fph": float(throughput[i]),
+                          "cumulative_departures": float(cumulative[i]),
+                          "disabled_probability": float(down[i]),
+                          "waiting_given_charging_down": float(waiting_given_down[i])}
+            for i,t in enumerate(INCIDENT_TIME_GRID) if t in (10, 20, 30, 60, 120)}
+        metadata.append(info)
+        print(f"   states={n}, nominal={info['nominal_fph']:.4f}, long-run={long_run:.4f} fph", flush=True)
+    write_csv(f"fig_{kind}_recovery.csv", [
+        "scenario", "n_evtol", "mean_recovery_min", "t_min", "throughput_fph",
+        "cumulative_departures", "disabled_probability", "waiting_while_charging_down",
+        "stand_occupancy", "waiting_given_charging_down", "nominal_fph", "long_run_fph", "states",
+    ], rows)
+    (INCIDENT_DIR/(kind+".manifest.json")).write_text(json.dumps({
+        "scenario": kind, "grid_min": list(INCIDENT_TIME_GRID), "cases": metadata,
+        "initialisation": "nominal stationary event flux; one incident at t=0; no recurrence",
+        "python": os.sys.version, "numpy": np.__version__, "scipy": scipy.__version__,
+        "bigrapher": subprocess.check_output([BIGRAPHER,"--version"], text=True).strip(),
+        "prism": subprocess.check_output([PRISM,"-version"], text=True).strip(),
+        "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+    }, indent=2)+"\n")
+
+
+
 MODULES = {
+    "aog": lambda: run_incident("aog"),
+    "charging": lambda: run_incident("charging"),
+    "exposure": run_exposure,
+    "turnaround": run_turnaround,
     "capacity": run_capacity,
     "open": run_open,
     "resilience": lambda: run_resilience_depth(n=6),
@@ -1147,7 +1547,8 @@ MODULES = {
 def main():
     order = ["capacity", "open", "resilience", "recovery", "recovery_v3",
              "compound_recovery", "compound_recovery_v2", "recovery_prob",
-             "compound_sw", "compound_sw_v2", "envelope", "availability"]
+             "compound_sw", "compound_sw_v2", "envelope", "availability",
+             "aog", "charging"]
     parser = argparse.ArgumentParser(
         description="BigraphER → PRISM pipeline for eVTOL vertiport analysis.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1171,8 +1572,9 @@ def main():
         help="list module names and exit",
     )
     args = parser.parse_args()
+    available_order = order + ["exposure", "turnaround"]
     if args.list:
-        for name in order:
+        for name in available_order:
             print(name)
         return
     selected = args.modules or order
@@ -1184,7 +1586,7 @@ def main():
             + ".  Choose from: "
             + ", ".join(order)
         )
-    selected = [m for m in order if m in selected]
+    selected = [m for m in available_order if m in selected]
     for name in selected:
         MODULES[name]()
     print("\nDone. CSV results are in analysis/.")
